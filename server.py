@@ -61,7 +61,7 @@ FIREBASE_DB_URL = os.environ.get(
 DB_ROOT = "/pychat"                  # tutti i dati dell'app vivono sotto questo nodo
 MEDIA_DIR = os.path.join(BASE_DIR, "media")
 
-SMS_MODE = os.environ.get("PYCHAT_SMS_MODE", "twilio_verify").strip().lower()   # "twilio_verify" (reale) | "simulation" (solo sviluppo)
+SMS_MODE = os.environ.get("PYCHAT_SMS_MODE", "simulation").strip().lower()   # "twilio_verify" (reale) | "simulation" (solo sviluppo)
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "").strip()
 TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "").strip()
 TWILIO_VERIFY_SID = os.environ.get("TWILIO_VERIFY_SERVICE_SID", "").strip()
