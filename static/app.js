@@ -15,11 +15,17 @@ let token = null;
 let me = null;
 let selectedContact = null;
 let contacts = [];
+let sendQueue = [];
 
 // ---------- Connection ----------
 function connect() {
   ws = new WebSocket(WS_URL);
-  ws.onopen = () => console.log("[ws] connected");
+  ws.onopen = () => {
+    console.log("[ws] connected");
+    // flush any messages queued while connecting
+    const q = sendQueue.splice(0, sendQueue.length);
+    q.forEach(obj => ws.send(JSON.stringify(obj)));
+  };
   ws.onmessage = onMessage;
   ws.onclose = () => {
     console.log("[ws] closed");
@@ -29,8 +35,11 @@ function connect() {
 }
 
 function send(obj) {
+  const data = JSON.stringify(obj);
   if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(obj));
+    ws.send(data);
+  } else {
+    sendQueue.push(obj);
   }
 }
 
@@ -71,18 +80,35 @@ document.querySelectorAll(".tab").forEach(btn => {
 loginForm.addEventListener("submit", e => {
   e.preventDefault();
   clearAuthMsg();
+  const btn = loginForm.querySelector('button[type="submit"]');
+  const originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Accedi...";
   const fd = new FormData(loginForm);
   send({ t: "login", username: fd.get("username"), password: fd.get("password") });
+  // restore button after a short delay; server "ok" response switches views anyway
+  setTimeout(() => {
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }, 2000);
 });
 
 registerForm.addEventListener("submit", e => {
   e.preventDefault();
   clearAuthMsg();
+  const btn = registerForm.querySelector('button[type="submit"]');
+  const originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Creazione...";
   const fd = new FormData(registerForm);
   const msg = { t: "register", username: fd.get("username"), password: fd.get("password") };
   const phone = fd.get("phone");
   if (phone) msg.phone = phone;
   send(msg);
+  setTimeout(() => {
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }, 2000);
 });
 
 // ---------- Messenger UI ----------
