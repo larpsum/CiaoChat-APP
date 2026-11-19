@@ -6,7 +6,7 @@ PyChat Ultimate Messenger - SERVER
   * Server TCP multithread, protocollo a righe JSON (una riga = un pacchetto, campo "t" = comando)
   * Persistenza su Firebase Realtime Database tramite firebase_admin:
         utenti, credenziali (solo hash PBKDF2 + salt), numeri di telefono, rubrica, messaggi
-  * Registrazione con verifica OTP via SMS REALE (Twilio Verify): il codice lo genera, lo invia e lo controlla Twilio
+  * Registrazione con verifica OTP via SMS simulato
   * Rubrica: aggiunta contatto per username esatto oppure per numero di telefono (E.164)
   * Messaggi diretti in tempo reale (testo e messaggi vocali), immagini profilo/banner
   * Chiamate audio e videochiamate 1-a-1: il server fa solo da segnalazione e inoltro
@@ -20,10 +20,6 @@ Avvio:
     python server.py
 Serve il file serviceAccountKey.json (Console Firebase > Impostazioni progetto > Account di servizio).
 
-SMS reali: imposta queste variabili d'ambiente prima di avviare il server (mai scriverle nel codice):
-    TWILIO_ACCOUNT_SID          (Console Twilio > Account info)
-    TWILIO_AUTH_TOKEN           (Console Twilio > Account info)
-    TWILIO_VERIFY_SERVICE_SID   (Console Twilio > Verify > Services > Create new, inizia con "VA")
 Opzionale: PYCHAT_SMS_PREFIXES="+39,+41" limita i paesi a cui inviare SMS (consigliato contro le frodi).
 Tutti i dati vengono scritti sotto il nodo /pychat del database, senza toccare altri dati del progetto.
 """
@@ -41,10 +37,6 @@ import socket
 import sys
 import threading
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
-
 try:
     import firebase_admin
     from firebase_admin import credentials, db
@@ -61,15 +53,11 @@ FIREBASE_DB_URL = os.environ.get(
 DB_ROOT = "/pychat"                  # tutti i dati dell'app vivono sotto questo nodo
 MEDIA_DIR = os.path.join(BASE_DIR, "media")
 
-SMS_MODE = os.environ.get("PYCHAT_SMS_MODE", "twilio_verify").strip().lower()   # "twilio_verify" (reale) | "simulation" (solo sviluppo)
-TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "").strip()
-TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "").strip()
-TWILIO_VERIFY_SID = os.environ.get("TWILIO_VERIFY_SERVICE_SID", "").strip()
-TWILIO_VERIFY_URL = os.environ.get("TWILIO_VERIFY_URL", "https://verify.twilio.com/v2")
+SMS_MODE = os.environ.get("PYCHAT_SMS_MODE", "simulation").strip().lower()
 SMS_ALLOWED_PREFIXES = tuple(p.strip() for p in os.environ.get("PYCHAT_SMS_PREFIXES", "").split(",") if p.strip())
 SMS_MAX_PER_IP_HOUR = 5              # SMS richiedibili da uno stesso IP in un'ora
 SMS_MAX_PER_PHONE_10MIN = 3          # SMS richiedibili per uno stesso numero in 10 minuti
-OTP_TTL_SECONDS = 600                # come la validita' predefinita dei codici Twilio Verify (10 minuti)
+OTP_TTL_SECONDS = 600
 OTP_MAX_TRIES = 5
 PBKDF2_ITERATIONS = 200_000
 MAX_TOKENS_PER_USER = 5
@@ -112,67 +100,6 @@ class SmsError(Exception):
         self.fatal = fatal
 
 
-class TwilioVerifyGateway:
-    """SMS reali con Twilio Verify: Twilio genera il codice, lo spedisce e lo controlla
-    (scadenza, numero di tentativi e protezione antifrode inclusi). Il server non conosce mai il codice."""
-
-    # codici di errore Twilio -> messaggio per l'utente
-    SEND_ERRORS = {
-        60200: "Numero di telefono non valido.",
-        60203: "Troppi SMS inviati a questo numero. Riprova piu' tardi.",
-        60205: "Questo numero non puo' ricevere SMS (ad esempio e' una linea fissa).",
-        60410: "Numero bloccato dalla protezione antifrode di Twilio.",
-        21608: "Account Twilio di prova: gli SMS arrivano solo ai numeri verificati nella console Twilio.",
-        21211: "Numero di telefono non valido.",
-    }
-
-    def __init__(self, sid, token, service):
-        self.sid, self.token, self.service = sid, token, service
-        self.auth = "Basic " + base64.b64encode(f"{sid}:{token}".encode()).decode()
-
-    def _post(self, path, fields):
-        req = urllib.request.Request(f"{TWILIO_VERIFY_URL}/Services/{self.service}/{path}",
-                                     data=urllib.parse.urlencode(fields).encode(), method="POST")
-        req.add_header("Authorization", self.auth)
-        req.add_header("Content-Type", "application/x-www-form-urlencoded")
-        try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                return resp.status, json.loads(resp.read().decode("utf-8") or "{}")
-        except urllib.error.HTTPError as e:
-            try:
-                return e.code, json.loads(e.read().decode("utf-8") or "{}")
-            except ValueError:
-                return e.code, {}
-        except (urllib.error.URLError, OSError, ValueError) as e:
-            log(f"Twilio non raggiungibile: {e!r}")
-            raise SmsError("Servizio SMS non raggiungibile. Riprova tra poco.")
-
-    def start(self, phone):
-        """Chiede a Twilio di inviare l'SMS. Non restituisce mai il codice."""
-        status, body = self._post("Verifications", {"To": phone, "Channel": "sms"})
-        if status in (200, 201):
-            log(f"SMS di verifica inviato a {phone}")
-            return None
-        log(f"Twilio ha rifiutato l'invio a {phone}: HTTP {status} {body}")
-        if status in (401, 403):
-            raise SmsError("Servizio SMS non configurato correttamente. Contatta l'amministratore.")
-        if status == 429:
-            raise SmsError("Troppe richieste. Riprova tra qualche minuto.")
-        raise SmsError(self.SEND_ERRORS.get(body.get("code"), "Impossibile inviare l'SMS. Riprova piu' tardi."))
-
-    def check(self, phone, code):
-        """True se Twilio approva il codice, False se e' sbagliato."""
-        status, body = self._post("VerificationCheck", {"To": phone, "Code": code})
-        if status == 200:
-            return body.get("status") == "approved"
-        log(f"Twilio VerificationCheck per {phone}: HTTP {status} {body}")
-        if status == 404:
-            raise SmsError("Il codice e' scaduto o gia' usato. Richiedine uno nuovo.", fatal=True)
-        if status == 429:
-            raise SmsError("Troppi tentativi errati. Richiedi un nuovo codice.", fatal=True)
-        raise SmsError("Verifica non riuscita. Riprova.")
-
-
 class SimulatedGateway:
     """Solo per sviluppo (PYCHAT_SMS_MODE=simulation): NESSUN SMS viene inviato e il codice viene
     restituito al client. Non verifica il telefono: non usarlo in produzione."""
@@ -195,19 +122,7 @@ def build_gateway():
     if SMS_MODE == "simulation":
         log("ATTENZIONE: modalita' SMS SIMULATO - nessun SMS reale, il codice viene mostrato al client.")
         return SimulatedGateway()
-    if SMS_MODE != "twilio_verify":
-        sys.exit(f"PYCHAT_SMS_MODE '{SMS_MODE}' non riconosciuto. Valori ammessi: twilio_verify, simulation.")
-    missing = [n for n, v in (("TWILIO_ACCOUNT_SID", TWILIO_ACCOUNT_SID), ("TWILIO_AUTH_TOKEN", TWILIO_AUTH_TOKEN),
-                              ("TWILIO_VERIFY_SERVICE_SID", TWILIO_VERIFY_SID)) if not v]
-    if missing:
-        sys.exit("Per inviare SMS reali mancano queste variabili d'ambiente: " + ", ".join(missing) + "\n"
-                 "  1. Crea un account su twilio.com e copia Account SID e Auth Token dalla console.\n"
-                 "  2. Console > Verify > Services > Create new service, poi copia il Service SID (inizia con VA).\n"
-                 "  3. Impostale prima di avviare il server, ad esempio in PowerShell:\n"
-                 "       $env:TWILIO_ACCOUNT_SID='AC...'; $env:TWILIO_AUTH_TOKEN='...'; $env:TWILIO_VERIFY_SERVICE_SID='VA...'\n"
-                 "     (oppure, su Linux/macOS: export TWILIO_ACCOUNT_SID=AC... ecc.)")
-    log("SMS reali attivi tramite Twilio Verify." + (f" Prefissi ammessi: {', '.join(SMS_ALLOWED_PREFIXES)}." if SMS_ALLOWED_PREFIXES else ""))
-    return TwilioVerifyGateway(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_VERIFY_SID)
+    sys.exit(f"PYCHAT_SMS_MODE '{SMS_MODE}' non riconosciuto. Valore ammesso: simulation.")
 
 
 def sms_send_allowed(ip, phone):
@@ -444,7 +359,7 @@ def handle_register(conn, m):
         if not sms_send_allowed(conn.ip, phone):
             return err("Hai richiesto troppi codici. Riprova tra qualche minuto.")
         try:
-            revealed = gateway.start(phone)        # None con SMS reali: il codice non passa dal server
+            revealed = gateway.start(phone)
         except SmsError as e:
             return err(str(e))
         conn.pending = {"user": key, "phone": phone, "exp": time.time() + OTP_TTL_SECONDS, "tries": 0}
@@ -461,7 +376,7 @@ def handle_register(conn, m):
         conn.pending = None
         return err("Troppi tentativi errati. Richiedi un nuovo codice.")
     try:
-        approved = gateway.check(phone, otp)       # il controllo lo fa Twilio
+        approved = gateway.check(phone, otp)
     except SmsError as e:
         if e.fatal:
             conn.pending = None
