@@ -7,6 +7,8 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://unpkg.com/@phosphor-icons/web@2.1.1/src/regular/style.css">
+<link rel="stylesheet" href="https://unpkg.com/@phosphor-icons/web@2.1.1/src/bold/style.css">
 <link rel="stylesheet" href="static/style.css">
 </head>
 <body>
@@ -67,21 +69,32 @@
       <div class="sidebar-header">
         <div class="brand-inline">CiaoChat</div>
         <button class="icon-btn" id="newChatBtn" title="Nuova conversazione">
-          <svg width="18" height="18" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M12 6v6m0 0v6m0-6h6m-6 0H6"/></svg>
+          <i class="ph ph-user-plus" aria-hidden="true"></i>
         </button>
       </div>
 
+      <div class="list-title"><i class="ph ph-list" aria-hidden="true"></i> Gruppi</div>
+      <ul class="community-list" id="communityList"></ul>
+      <div class="inline-contact-add">
+        <input id="newCommunityName" type="text" maxlength="64" placeholder="Nome del gruppo" aria-label="Nome del nuovo gruppo">
+        <button class="icon-btn" id="createCommunityBtn" type="button" aria-label="Crea gruppo"><i class="ph ph-plus" aria-hidden="true"></i></button>
+      </div>
       <div class="search-wrap">
         <input type="text" id="contactSearch" placeholder="Cerca contatti">
       </div>
 
-      <div class="list-title">Contatti</div>
+      <div class="list-title"><i class="ph ph-user" aria-hidden="true"></i> Contatti</div>
+      <div class="inline-contact-add">
+        <input id="quickContactInput" type="text" placeholder="Username o telefono" aria-label="Username o telefono">
+        <button class="icon-btn" id="quickContactAddBtn" type="button" aria-label="Aggiungi contatto"><i class="ph ph-user-plus" aria-hidden="true"></i></button>
+        <div id="quickContactFeedback" role="status"></div>
+      </div>
       <ul class="contact-list" id="contactList">
         <li class="contact-item empty">Nessun contatto ancora. Usa "Nuova conversazione" per aggiungerne uno.</li>
       </ul>
 
       <div class="sidebar-footer">
-        <button class="btn btn-outline btn-block profile-settings-btn" id="profileSettingsBtn">Personalizza profilo</button>
+        <button class="btn btn-outline btn-block profile-settings-btn" id="profileSettingsBtn"><i class="ph ph-user" aria-hidden="true"></i> Impostazioni utente</button>
         <button class="btn btn-outline btn-block" id="logoutBtn">Esci</button>
       </div>
     </aside>
@@ -97,15 +110,17 @@
           <div class="conv-status" id="convStatus">Seleziona una conversazione</div>
         </div>
         <div class="conv-actions">
-          <button class="icon-btn" id="profileSettingsHeaderBtn" title="Personalizza profilo" aria-label="Personalizza profilo"><svg width="18" height="18" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 14v3m0 0v3m0-3h3m-3 0H9"/></svg></button>
-          <button class="icon-btn" title="Chiama"><svg width="18" height="18" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72V12.8A2 2 0 0 1 9.31 16.5a19.5 19.5 0 0 1 6 6 19.79 19.79 0 0 1 8.63-3.07 2 2 0 0 1 2-1.72V6.86"/></svg></button>
+          <button class="icon-btn" id="profileSettingsHeaderBtn" title="Impostazioni" aria-label="Impostazioni"><i class="ph ph-gear" aria-hidden="true"></i></button>
+          <button class="icon-btn" id="microphoneButton" title="Microfono" aria-label="Microfono"><i class="ph ph-microphone" aria-hidden="true"></i></button>
+          <button class="icon-btn" id="callButton" title="Videochiamata" aria-label="Videochiamata"><i class="ph ph-video-camera" aria-hidden="true"></i></button>
         </div>
       </header>
+      <nav class="community-channel-bar hidden" id="communityChannelBar" aria-label="Canali"></nav>
 
       <!-- Messages -->
       <div class="messages" id="messages">
         <div class="msg-placeholder">
-          <svg width="40" height="40" fill="none" stroke="#94a3b8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><polyline points="22 12 18 12 15 15 9 4 6 4"/><rect width="18" height="18" x="3" y="11"/></svg>
+          <i class="ph ph-chat-circle-dots placeholder-icon" aria-hidden="true"></i>
           <p>Seleziona un contatto per iniziare a chattare.</p>
         </div>
       </div>
@@ -113,70 +128,184 @@
       <!-- Composer -->
       <div class="composer">
         <div class="composer-inner">
-          <button class="icon-btn add" title="Allega"><svg width="18" height="18" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 14v3m0 0v3m0-3h3m-3 0H9"/></svg></button>
+          <button class="icon-btn add" title="Allega"><i class="ph ph-paperclip" aria-hidden="true"></i></button>
+          <button class="icon-btn composer-tool" title="Emoji"><i class="ph ph-smiley" aria-hidden="true"></i></button>
+          <button class="icon-btn composer-tool" title="Grassetto"><i class="ph ph-text-b" aria-hidden="true"></i></button>
+          <button class="icon-btn composer-tool" title="Corsivo"><i class="ph ph-text-italic" aria-hidden="true"></i></button>
+          <button class="icon-btn composer-tool" title="Link"><i class="ph ph-link" aria-hidden="true"></i></button>
+          <button class="icon-btn composer-tool" title="Menziona"><i class="ph ph-at" aria-hidden="true"></i></button>
           <input type="text" id="messageInput" placeholder="Scrivi un messaggio..." autocomplete="off">
-          <button class="btn btn-primary btn-sm" id="sendBtn" disabled>Invia</button>
+          <button class="btn btn-primary btn-sm" id="sendBtn" disabled><i class="ph ph-paper-plane-tilt" aria-hidden="true"></i><span>Invia</span></button>
         </div>
       </div>
     </section>
+    <aside class="context-sidebar" id="contextSidebar" aria-label="Contesto e partecipanti">
+      <div class="participant-search-row">
+        <label class="participant-search">
+          <i class="ph ph-magnifying-glass" aria-hidden="true"></i>
+          <input id="participantSearch" type="search" placeholder="Cerca partecipanti..." autocomplete="off">
+          <button class="icon-btn search-clear hidden" id="clearParticipantSearch" type="button" aria-label="Cancella ricerca"><i class="ph ph-x" aria-hidden="true"></i></button>
+        </label>
+        <button class="icon-btn" id="participantOverflow" type="button" title="Altre azioni" aria-label="Altre azioni"><i class="ph ph-dots-three" aria-hidden="true"></i></button>
+      </div>
+      <div class="participant-overflow-menu hidden" id="participantOverflowMenu">
+        <button type="button" id="refreshParticipantsBtn"><i class="ph ph-arrows-clockwise" aria-hidden="true"></i> Aggiorna directory</button>
+        <button type="button" id="openGroupSettingsBtn"><i class="ph ph-gear" aria-hidden="true"></i> Impostazioni gruppo</button>
+      </div>
+      <button class="participant-index-toggle" id="participantIndexToggle" type="button" aria-expanded="true">
+        <span><i class="ph ph-caret-down" id="participantIndexChevron" aria-hidden="true"></i><strong id="participantIndexTitle">Participants - Select a group</strong></span>
+        <span class="participant-count" id="participantCount">0</span>
+      </button>
+      <div class="participant-index" id="participantIndex">
+        <section class="member-invite-panel" id="memberInvitePanel">
+          <h3>Add Member</h3>
+          <label for="memberIdentifier">Email or username</label>
+          <div class="member-identifier-wrap">
+            <i class="ph ph-user-plus" aria-hidden="true"></i>
+            <input id="memberIdentifier" type="text" placeholder="Invite new member..." autocomplete="off">
+            <button class="icon-btn member-input-clear hidden" id="clearMemberIdentifier" type="button" aria-label="Cancella"><i class="ph ph-x" aria-hidden="true"></i></button>
+          </div>
+          <div class="suggested-roles-heading">Suggested roles</div>
+          <div id="suggestedRoles" class="suggested-roles" role="group" aria-label="Suggested roles"></div>
+          <button class="btn btn-primary invite-person-btn" id="invitePersonBtn" type="button"><i class="ph ph-paper-plane-tilt" aria-hidden="true"></i> Invite Person</button>
+          <div id="memberInviteFeedback" class="member-feedback" role="status" aria-live="polite"></div>
+        </section>
+        <section class="participant-directory-section">
+          <div class="participant-directory-heading"><strong>Participants</strong><span id="visibleParticipantCount">0 members</span></div>
+          <div id="participantDirectory" class="participant-directory" aria-live="polite"></div>
+        </section>
+        <section class="pending-invitations hidden" id="pendingInvitations">
+          <div class="participant-directory-heading"><strong>Inviti ricevuti</strong></div>
+          <div id="pendingInvitationList" class="participant-directory"></div>
+        </section>
+      </div>
+    </aside>
   </div>
 </div>
 
 <div class="profile-modal hidden" id="profileModal" role="dialog" aria-modal="true" aria-labelledby="profileModalTitle">
-  <div class="profile-dialog">
-    <div class="profile-dialog-header">
-      <div>
-        <h2 id="profileModalTitle">Personalizza il profilo</h2>
-        <p>Imposta immagini e stile del tuo nome.</p>
-      </div>
-      <button class="icon-btn" id="closeProfileModal" aria-label="Chiudi">×</button>
-    </div>
-    <div class="profile-preview">
-      <div class="profile-preview-banner" id="profilePreviewBanner"></div>
-      <div class="profile-preview-user">
-        <div class="profile-preview-avatar" id="profilePreviewAvatar">?</div>
-        <span class="name-style" id="profilePreviewName">Il tuo nome</span>
-      </div>
-    </div>
-    <div class="profile-fields">
-      <div class="profile-field">
-        <label for="avatarFile">Immagine profilo</label>
-        <div class="profile-file-row">
-          <input id="avatarFile" type="file" accept=".jpg,.png,.webp,.mp4,.gif,image/jpeg,image/png,image/webp,video/mp4,image/gif">
-          <button class="btn btn-outline" data-clear-media="avatar" type="button">Rimuovi</button>
+  <div class="settings-dialog">
+    <aside class="settings-sidebar">
+      <div class="settings-sidebar-title">IMPOSTAZIONI UTENTE</div>
+      <button class="settings-nav active" data-settings-section="account">Account &amp; Profilo</button>
+      <button class="settings-nav" data-settings-section="privacy">Privacy &amp; Sicurezza</button>
+      <button class="settings-nav" data-settings-section="voice">Voce &amp; Video</button>
+      <button class="settings-nav" data-settings-section="notifications">Notifiche</button>
+      <button class="settings-nav" data-settings-section="appearance">Aspetto &amp; Testo</button>
+      <button class="settings-nav" data-settings-section="keybinds">Tasti rapidi</button>
+      <div class="settings-sidebar-title community-settings-title">COMMUNITY</div>
+      <div id="communitySettingsNav"></div>
+    </aside>
+    <div class="settings-main">
+      <header class="settings-header">
+        <div>
+          <h2 id="profileModalTitle">Impostazioni</h2>
+          <p id="settingsSubtitle">Gestisci il tuo account e le preferenze.</p>
         </div>
+        <button class="icon-btn" id="closeProfileModal" aria-label="Chiudi"><i class="ph ph-x" aria-hidden="true"></i></button>
+      </header>
+      <div class="settings-content">
+        <section class="settings-panel active" data-settings-panel="account">
+          <h3>Account &amp; Profilo</h3>
+          <div class="profile-preview settings-profile-preview">
+            <div class="profile-preview-banner" id="profilePreviewBanner"></div>
+            <div class="profile-preview-user">
+              <div class="profile-preview-avatar" id="profilePreviewAvatar">?</div>
+              <span class="name-style" id="profilePreviewName">Il tuo nome</span>
+            </div>
+          </div>
+          <div class="settings-grid">
+            <div class="setting-field"><label>Nome visualizzato</label><input id="accountDisplayName" type="text" maxlength="32"></div>
+            <div class="setting-field"><label>Username</label><input id="accountUsername" type="text" maxlength="20"></div>
+            <div class="setting-field"><label>Email</label><input id="accountEmail" type="email"></div>
+            <div class="setting-field"><label>Telefono</label><input id="accountPhone" type="tel" disabled></div>
+            <div class="setting-field full"><label>Biografia</label><textarea id="accountBio" maxlength="160"></textarea></div>
+            <div class="setting-field full"><label>Stato personalizzato</label><input id="accountStatus" type="text" maxlength="80"></div>
+            <div class="setting-field"><label>Scadenza stato</label><select id="accountStatusExpiration"><option value="0">Mai</option><option value="3600">1 ora</option><option value="14400">4 ore</option><option value="86400">Oggi</option><option value="604800">7 giorni</option></select></div>
+            <div class="setting-field"><label>Colore nome</label><input id="nameColor" type="color" value="#f1f5f9"></div>
+            <div class="setting-field"><label>Animazione nome</label><select id="nameAnimation"><option value="none">Nessuna</option><option value="glow">Bagliore</option><option value="pulse">Impulso</option><option value="rainbow">Scintillio</option><option value="bounce">Rimbalzo</option><option value="shake">Scossa</option><option value="wave">Ondeggia</option><option value="flicker">Intermittenza</option></select></div>
+          </div>
+          <div class="settings-card">
+            <h4>Avatar e banner</h4>
+            <div class="profile-file-row"><input id="avatarFile" type="file" accept=".jpg,.png,.webp,.mp4,.gif,image/jpeg,image/png,image/webp,video/mp4,image/gif"><button class="btn btn-outline" data-clear-media="avatar" type="button">Rimuovi avatar</button></div>
+            <div class="profile-file-row"><input id="bannerFile" type="file" accept=".jpg,.png,.webp,.mp4,.gif,image/jpeg,image/png,image/webp,video/mp4,image/gif"><button class="btn btn-outline" data-clear-media="banner" type="button">Rimuovi banner</button></div>
+          </div>
+          <div class="settings-card">
+            <h4>Cambia password</h4>
+            <div class="settings-grid">
+              <div class="setting-field"><label>Password attuale</label><input id="currentPassword" type="password"></div>
+              <div class="setting-field"><label>Nuova password</label><input id="newPassword" type="password"></div>
+            </div>
+            <button class="btn btn-outline small-btn" id="changePasswordBtn" type="button">Cambia password</button>
+          </div>
+          <div class="settings-card"><h4>Autenticazione a due fattori</h4><button class="btn btn-outline small-btn" id="twoFactorBtn" type="button">Configura 2FA</button></div>
+          <div class="settings-card"><h4>Sessioni attive</h4><div id="sessionsList" class="settings-list"></div></div>
+        </section>
+
+        <section class="settings-panel" data-settings-panel="privacy">
+          <h3>Privacy &amp; Sicurezza</h3>
+          <div class="setting-row"><div><strong>Messaggi diretti</strong><small>Chi può inviarti messaggi</small></div><select id="dmPolicy"><option value="everyone">Tutti</option><option value="friends_group">Amici e membri dei gruppi</option><option value="friends">Solo amici</option></select></div>
+          <div class="setting-row"><div><strong>Richieste di amicizia</strong><small>Chi può inviarti richieste</small></div><select id="friendPolicy"><option value="everyone">Tutti</option><option value="mutuals">Amici in comune</option><option value="group_members">Membri di gruppi condivisi</option><option value="none">Nessuno</option></select></div>
+          <label class="toggle-row"><span><strong>Filtro contenuti multimediali</strong><small>Filtra allegati espliciti o indesiderati</small></span><input id="mediaFilter" type="checkbox"><span class="toggle"></span></label>
+          <div class="settings-card"><h4>Utenti bloccati</h4><div id="blockedUsersList" class="settings-list"></div></div>
+        </section>
+
+        <section class="settings-panel" data-settings-panel="voice">
+          <h3>Voce &amp; Video</h3>
+          <div class="settings-grid">
+            <div class="setting-field"><label>Dispositivo di input</label><select id="audioInput"></select></div>
+            <div class="setting-field"><label>Dispositivo di output</label><select id="audioOutput"></select></div>
+            <div class="setting-field"><label>Camera</label><select id="videoInput"></select></div>
+          </div>
+          <label class="range-row"><span>Volume input <output id="inputVolumeOut">100%</output></span><input id="inputVolume" type="range" min="0" max="100" value="100"></label>
+          <label class="range-row"><span>Volume output <output id="outputVolumeOut">100%</output></span><input id="outputVolume" type="range" min="0" max="100" value="100"></label>
+          <div class="settings-card">
+            <h4>Modalità input</h4>
+            <label class="toggle-row"><span><strong>Attivazione vocale</strong></span><input id="voiceActivity" type="radio" name="inputMode" value="voice" checked><span class="toggle"></span></label>
+            <label class="range-row"><span>Sensibilità <output id="voiceSensitivityOut">50</output></span><input id="voiceSensitivity" type="range" min="0" max="100" value="50"></label>
+            <label class="toggle-row"><span><strong>Push-to-Talk</strong></span><input id="pushToTalk" type="radio" name="inputMode" value="ptt"><span class="toggle"></span></label>
+          </div>
+          <label class="toggle-row"><span><strong>Cancellazione eco</strong></span><input id="echoCancel" type="checkbox" checked><span class="toggle"></span></label>
+          <label class="toggle-row"><span><strong>Riduzione rumore</strong></span><input id="noiseSuppress" type="checkbox" checked><span class="toggle"></span></label>
+          <label class="toggle-row"><span><strong>Controllo automatico guadagno</strong></span><input id="autoGain" type="checkbox" checked><span class="toggle"></span></label>
+          <label class="toggle-row"><span><strong>Test microfono</strong><small>Loopback locale</small></span><input id="micLoopback" type="checkbox"><span class="toggle"></span></label>
+          <audio id="micLoopbackAudio" muted></audio>
+        </section>
+
+        <section class="settings-panel" data-settings-panel="notifications">
+          <h3>Notifiche</h3>
+          <label class="toggle-row"><span><strong>Notifiche desktop</strong></span><input id="desktopNotifications" type="checkbox"><span class="toggle"></span></label>
+          <label class="toggle-row"><span><strong>Badge messaggi non letti</strong></span><input id="unreadBadge" type="checkbox" checked><span class="toggle"></span></label>
+          <label class="toggle-row"><span><strong>Suono messaggio in arrivo</strong></span><input id="soundMessage" type="checkbox" checked><span class="toggle"></span></label>
+          <label class="toggle-row"><span><strong>Suono chiamata</strong></span><input id="soundCall" type="checkbox" checked><span class="toggle"></span></label>
+          <label class="toggle-row"><span><strong>Suoni attiva/disattiva</strong></span><input id="soundMute" type="checkbox" checked><span class="toggle"></span></label>
+          <label class="toggle-row"><span><strong>Non disturbare</strong></span><input id="doNotDisturb" type="checkbox"><span class="toggle"></span></label>
+        </section>
+
+        <section class="settings-panel" data-settings-panel="appearance">
+          <h3>Aspetto &amp; Testo</h3>
+          <div class="setting-row"><div><strong>Tema</strong></div><select id="themeSelect"><option value="dark">Scuro</option><option value="oled">OLED nero</option><option value="light">Chiaro</option></select></div>
+          <div class="setting-row"><div><strong>Densità messaggi</strong></div><div class="segmented"><button type="button" data-density="cozy">Confortevole</button><button type="button" data-density="compact">Compatta</button></div></div>
+          <label class="range-row"><span>Dimensione testo <output id="fontSizeOut">100%</output></span><input id="fontSize" type="range" min="85" max="130" value="100"></label>
+          <label class="toggle-row"><span><strong>Riduci movimento</strong><small>Ferma animazioni e GIF automatiche</small></span><input id="reducedMotion" type="checkbox"><span class="toggle"></span></label>
+          <label class="toggle-row"><span><strong>Anteprime link</strong></span><input id="linkPreviews" type="checkbox" checked><span class="toggle"></span></label>
+          <label class="toggle-row"><span><strong>Anteprime immagini</strong></span><input id="inlineImages" type="checkbox" checked><span class="toggle"></span></label>
+          <label class="toggle-row"><span><strong>Conversione emoji</strong></span><input id="autoEmoji" type="checkbox" checked><span class="toggle"></span></label>
+        </section>
+
+        <section class="settings-panel" data-settings-panel="keybinds">
+          <h3>Tasti rapidi</h3>
+          <div class="keybind-row"><span>Attiva/disattiva microfono</span><button class="keybind-recorder" data-keybind="mute">Non impostato</button></div>
+          <div class="keybind-row"><span>Attiva/disattiva audio</span><button class="keybind-recorder" data-keybind="deafen">Non impostato</button></div>
+          <div class="keybind-row"><span>Push-to-Talk</span><button class="keybind-recorder" data-keybind="ptt">Non impostato</button></div>
+        </section>
+
+        <section class="settings-panel" data-settings-panel="community">
+          <div id="communitySettingsContent"><h3>Impostazioni community</h3><p class="muted">Seleziona una community amministrabile.</p></div>
+        </section>
+        <div id="profileStatus" class="settings-status" role="status"></div>
       </div>
-      <div class="profile-field">
-        <label for="bannerFile">Banner</label>
-        <div class="profile-file-row">
-          <input id="bannerFile" type="file" accept=".jpg,.png,.webp,.mp4,.gif,image/jpeg,image/png,image/webp,video/mp4,image/gif">
-          <button class="btn btn-outline" data-clear-media="banner" type="button">Rimuovi</button>
-        </div>
-      </div>
-      <div class="profile-style-row">
-        <div class="profile-field">
-          <label for="nameColor">Colore nome</label>
-          <input id="nameColor" type="color" value="#f1f5f9">
-        </div>
-        <div class="profile-field">
-          <label for="nameAnimation">Animazione nome</label>
-          <select id="nameAnimation">
-            <option value="none">Nessuna</option>
-            <option value="glow">Bagliore</option>
-            <option value="pulse">Impulso</option>
-            <option value="rainbow">Scintillio</option>
-            <option value="bounce">Rimbalzo</option>
-            <option value="shake">Scossa</option>
-            <option value="wave">Ondeggia</option>
-            <option value="flicker">Intermittenza</option>
-          </select>
-        </div>
-      </div>
-      <div class="profile-dialog-actions">
-        <span id="profileStatus" role="status"></span>
-        <button class="btn btn-primary" id="saveProfileStyle" type="button">Salva stile</button>
-      </div>
-      <p class="profile-help">Formati consentiti: JPG, PNG, WEBP, MP4 e GIF. Dimensione massima: 1,7 MB.</p>
+      <footer class="unsaved-bar hidden" id="unsavedBar"><span><strong>Modifiche non salvate</strong></span><div><button class="btn btn-outline small-btn" id="resetSettingsBtn" type="button">Reset</button><button class="btn btn-primary small-btn" id="saveSettingsBtn" type="button">Salva modifiche</button></div></footer>
     </div>
   </div>
 </div>

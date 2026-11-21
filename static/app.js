@@ -22,6 +22,55 @@ let pendingMediaKind = null;
 const mediaCache = new Map();
 const mediaRequests = new Set();
 const allowedExtensions = new Set(["jpg", "png", "webp", "mp4", "gif"]);
+let settingsSnapshot = null;
+let communitySnapshot = null;
+let communityListData = [];
+let settingsBaseline = null;
+let currentCommunityId = null;
+let currentCommunity = null;
+let currentChannelId = null;
+let pendingGroupSelection = false;
+let memberActionPending = null;
+let selectedInviteRoles = new Set();
+let pendingInvitations = [];
+let quickContactPending = false;
+
+const DEFAULT_LOCAL_SETTINGS = {
+  theme: "dark",
+  density: "cozy",
+  fontSize: 100,
+  reducedMotion: false,
+  linkPreviews: true,
+  inlineImages: true,
+  autoEmoji: true,
+  desktopNotifications: false,
+  unreadBadge: true,
+  soundMessage: true,
+  soundCall: true,
+  soundMute: true,
+  doNotDisturb: false,
+  audioInput: "",
+  audioOutput: "",
+  videoInput: "",
+  inputVolume: 100,
+  outputVolume: 100,
+  inputMode: "voice",
+  voiceSensitivity: 50,
+  echoCancel: true,
+  noiseSuppress: true,
+  autoGain: true,
+  keybinds: { mute: "", deafen: "", ptt: "" },
+};
+
+function loadLocalSettings() {
+  try {
+    return { ...DEFAULT_LOCAL_SETTINGS, ...JSON.parse(localStorage.getItem("ciaochat.settings") || "{}") };
+  } catch {
+    return { ...DEFAULT_LOCAL_SETTINGS };
+  }
+}
+
+let localSettings = loadLocalSettings();
 
 // ---------- Connection ----------
 function connect() {
@@ -160,6 +209,8 @@ const nameAnimation = el("nameAnimation");
 const profilePreviewAvatar = el("profilePreviewAvatar");
 const profilePreviewBanner = el("profilePreviewBanner");
 const profilePreviewName = el("profilePreviewName");
+const participantSearch = el("participantSearch");
+const participantDirectory = el("participantDirectory");
 
 function renderContacts() {
   contactList.innerHTML = "";
@@ -195,11 +246,486 @@ function makeEmptyItem() {
   return li;
 }
 
+function renderCommunityList(communities) {
+  const list = el("communityList");
+  list.replaceChildren();
+  (communities || []).forEach(community => {
+    const item = document.createElement("li");
+    item.className = "community-item" + (community.id === currentCommunityId ? " active" : "");
+    item.dataset.communityId = community.id;
+    item.tabIndex = 0;
+    item.setAttribute("role", "button");
+    const icon = document.createElement("span");
+    icon.className = "community-list-icon";
+    icon.textContent = (community.name || "G").slice(0, 1).toUpperCase();
+    const name = document.createElement("span");
+    name.textContent = community.name || "Gruppo";
+    item.append(icon, name);
+    item.addEventListener("click", () => selectCommunity(community.id));
+    item.addEventListener("keydown", event => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        selectCommunity(community.id);
+      }
+    });
+    list.appendChild(item);
+  });
+  if (!list.children.length) {
+    const empty = document.createElement("li");
+    empty.className = "community-list-empty";
+    empty.textContent = "Nessun gruppo";
+    list.appendChild(empty);
+  }
+}
+
+function selectCommunity(communityId) {
+  currentCommunityId = communityId;
+  currentCommunity = null;
+  currentChannelId = null;
+  selectedContact = null;
+  pendingGroupSelection = true;
+  selectedInviteRoles.clear();
+  renderContacts();
+  renderCommunityList(communityListData);
+  convName.textContent = "Caricamento gruppo...";
+  convStatus.textContent = "";
+  messageInput.disabled = true;
+  sendBtn.disabled = true;
+  participantDirectory.replaceChildren();
+  el("memberInvitePanel").classList.remove("hidden");
+  el("participantIndexTitle").textContent = "Participants - Loading...";
+  el("participantCount").textContent = "…";
+  el("messages").replaceChildren(makePlaceholder("Caricamento dei canali..."));
+  send({ t: "community_get", community: communityId });
+}
+
+function renderParticipants(community) {
+  const participants = community?.participants || [];
+  const roles = community?.roles || {};
+  const canInvite = !!(
+    community?.permissions?.create_invites ||
+    community?.permissions?.administrator
+  );
+  const canAssignRoles = !!(
+    community?.permissions?.manage_roles ||
+    community?.permissions?.administrator
+  );
+  const canRemove = !!(
+    community?.permissions?.kick_members ||
+    community?.permissions?.administrator
+  );
+  el("memberInvitePanel").classList.toggle("hidden", !canInvite);
+  el("participantIndexTitle").textContent = `Participants - ${community?.name || "Group"}`;
+  el("participantCount").textContent = String(participants.length);
+  el("visibleParticipantCount").textContent = `${participants.length} members`;
+  el("suggestedRoles").replaceChildren();
+  Object.entries(roles).forEach(([roleId, role]) => {
+    if (["everyone", "owner"].includes(roleId)) return;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "suggested-role";
+    button.dataset.roleId = roleId;
+    const isSelected = selectedInviteRoles.has(roleId);
+    button.classList.toggle("selected", isSelected);
+    button.setAttribute("aria-pressed", String(isSelected));
+    button.disabled = !canAssignRoles;
+    const check = document.createElement("i");
+    check.className = "ph ph-check";
+    check.classList.toggle("ph-bold", isSelected);
+    check.setAttribute("aria-hidden", "true");
+    const label = document.createElement("span");
+    label.textContent = role.name || roleId;
+    button.append(check, label);
+    button.addEventListener("click", () => {
+      const selected = selectedInviteRoles.has(roleId);
+      if (selected) selectedInviteRoles.delete(roleId);
+      else selectedInviteRoles.add(roleId);
+      button.classList.toggle("selected", !selected);
+      button.setAttribute("aria-pressed", String(!selected));
+      check.classList.toggle("ph-bold", !selected);
+    });
+    el("suggestedRoles").appendChild(button);
+  });
+  el("invitePersonBtn").disabled = !canInvite;
+
+  const query = participantSearch.value.trim().toLowerCase();
+  participantDirectory.replaceChildren();
+  const visible = participants.filter(participant => {
+    const roleNames = (participant.roles || []).map(role => role.name).join(" ");
+    return [
+      participant.name, participant.username, participant.email, roleNames,
+    ].some(value => String(value || "").toLowerCase().includes(query));
+  });
+  el("visibleParticipantCount").textContent = `${visible.length} of ${participants.length} members`;
+  visible.forEach(participant => {
+    const row = document.createElement("article");
+    row.className = "participant-row";
+    row.dataset.memberId = participant.id;
+    row.dataset.search = [
+      participant.name, participant.username, participant.email,
+      (participant.roles || []).map(role => role.name).join(" "),
+    ].join(" ").toLowerCase();
+    const main = document.createElement("div");
+    main.className = "participant-row-main";
+    const avatar = document.createElement("span");
+    avatar.className = "participant-avatar";
+    avatar.setAttribute("aria-hidden", "true");
+    const avatarMedia = mediaElement(participant.avatar, "participant-avatar-media");
+    if (avatarMedia) {
+      avatar.appendChild(avatarMedia);
+    } else {
+      avatar.innerHTML = `<i class="ph ph-user" aria-hidden="true"></i><span>${escapeHtml(avatarInitial(participant.name || participant.username))}</span>`;
+    }
+    const details = document.createElement("div");
+    details.className = "participant-details";
+    const title = document.createElement("strong");
+    title.textContent = participant.name || participant.username;
+    const handle = document.createElement("small");
+    handle.textContent = `@${participant.username || participant.id}`;
+    details.append(title, handle);
+    const status = document.createElement("span");
+    status.className = `participant-status-dot ${participant.online ? "online" : "offline"}`;
+    status.title = participant.online ? "Online" : "Offline";
+    status.setAttribute("aria-label", status.title);
+    main.append(status, avatar, details);
+    const badges = document.createElement("div");
+    badges.className = "participant-role-badges";
+    (participant.roles || []).forEach(role => {
+      const badge = document.createElement("span");
+      badge.className = "participant-role-badge";
+      badge.textContent = role.name;
+      if (/^#[0-9a-f]{6}$/i.test(role.color || "")) badge.style.setProperty("--role-color", role.color);
+      badges.appendChild(badge);
+    });
+    row.append(main, badges);
+
+    if (canAssignRoles || canRemove) {
+      const actions = document.createElement("div");
+      actions.className = "participant-row-actions";
+      if (canAssignRoles && participant.id !== me?.id) {
+        const edit = document.createElement("button");
+        edit.type = "button";
+        edit.className = "icon-btn participant-action";
+        edit.title = "Modifica ruoli";
+        edit.setAttribute("aria-label", `Modifica ruoli di ${participant.name || participant.username}`);
+        edit.innerHTML = '<i class="ph ph-pencil-simple" aria-hidden="true"></i>';
+        edit.addEventListener("click", () => toggleInlineRoleEditor(row, participant, roles));
+        actions.appendChild(edit);
+      }
+      if (canRemove && participant.id !== me?.id) {
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "icon-btn participant-action remove-action";
+        remove.title = "Remove member";
+        remove.setAttribute("aria-label", `Remove ${participant.name || participant.username}`);
+        remove.innerHTML = '<i class="ph ph-trash" aria-hidden="true"></i>';
+        remove.addEventListener("click", () => showInlineRemoveConfirmation(row, participant));
+        actions.appendChild(remove);
+      }
+      row.appendChild(actions);
+    }
+    participantDirectory.appendChild(row);
+  });
+  Object.entries(community?.member_invites || {}).forEach(([userId, invite]) => {
+    const invitedUser = (invite?.user?.username || invite?.username || userId).toLowerCase();
+    const roleNames = (invite?.roles || []).map(roleId => roles[roleId]?.name || roleId).join(" ");
+    if (query && !`${invitedUser} ${roleNames} invito in attesa`.toLowerCase().includes(query)) return;
+    const pending = document.createElement("article");
+    pending.className = "participant-row pending-member";
+    const main = document.createElement("div");
+    main.className = "participant-row-main";
+    const icon = document.createElement("i");
+    icon.className = "ph ph-paper-plane-tilt pending-member-icon";
+    icon.setAttribute("aria-hidden", "true");
+    const details = document.createElement("div");
+    details.className = "participant-details";
+    const label = document.createElement("strong");
+    label.textContent = invitedUser;
+    const state = document.createElement("small");
+    state.textContent = "Invito in attesa";
+    details.append(label, state);
+    main.append(icon, details);
+    pending.appendChild(main);
+    if (canInvite) {
+      const revoke = document.createElement("button");
+      revoke.type = "button";
+      revoke.className = "icon-btn participant-action remove-action";
+      revoke.title = "Revoca invito";
+      revoke.setAttribute("aria-label", `Revoca invito per ${invitedUser}`);
+      revoke.innerHTML = '<i class="ph ph-x" aria-hidden="true"></i>';
+      revoke.addEventListener("click", () => {
+        const success = send({
+          t: "community_member_invite_revoke", community: currentCommunityId, user: userId,
+        });
+        if (!success) {
+          inviteFeedback.textContent = "Connessione non disponibile. Riprova.";
+          inviteFeedback.className = "member-feedback error";
+          return;
+        }
+        memberActionPending = {
+          type: "revoke",
+          retry: () => revoke.click(),
+          feedback: inviteFeedback,
+        };
+        inviteFeedback.textContent = "Revoca dell'invito...";
+        inviteFeedback.className = "member-feedback";
+      });
+      pending.appendChild(revoke);
+    }
+    const inviteFeedback = document.createElement("div");
+    inviteFeedback.className = "member-feedback";
+    inviteFeedback.setAttribute("role", "status");
+    pending.appendChild(inviteFeedback);
+    participantDirectory.appendChild(pending);
+  });
+  if (!visible.length) {
+    const empty = document.createElement("p");
+    empty.className = "participant-empty";
+    empty.textContent = query ? "No participants match this search."
+      : "No participants yet.";
+    participantDirectory.appendChild(empty);
+  }
+}
+
+function showCommunityInChat(community) {
+  currentCommunity = community;
+  pendingGroupSelection = false;
+  currentChannelId = community.channels?.[0]?.id || null;
+  convName.textContent = community.name || "Gruppo";
+  convStatus.textContent = currentChannelId
+    ? `# ${community.channels[0].name}`
+    : "Nessun canale accessibile";
+  renderCommunityList(communityListData);
+  renderParticipants(community);
+
+  const channelBar = el("communityChannelBar");
+  channelBar.replaceChildren();
+  channelBar.classList.toggle("hidden", !community.channels?.length);
+  (community.channels || []).forEach(channel => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "community-channel-button";
+    button.dataset.channelId = channel.id;
+    button.classList.toggle("active", channel.id === currentChannelId);
+    button.textContent = `# ${channel.name}`;
+    button.addEventListener("click", () => selectCommunityChannel(channel.id));
+    channelBar.appendChild(button);
+  });
+  if (currentChannelId) {
+    messageInput.disabled = false;
+    send({ t: "community_channel_history", community: community.id, channel: currentChannelId });
+  } else {
+    messageInput.disabled = true;
+    el("messages").replaceChildren(makePlaceholder("Nessun canale accessibile in questo gruppo."));
+  }
+}
+
+function selectCommunityChannel(channelId) {
+  if (!currentCommunity || !currentCommunity.channels?.some(channel => channel.id === channelId)) return;
+  currentChannelId = channelId;
+  const channel = currentCommunity.channels.find(item => item.id === channelId);
+  convStatus.textContent = `# ${channel.name}`;
+  el("communityChannelBar").querySelectorAll(".community-channel-button").forEach(button => {
+    button.classList.toggle("active", button.dataset.channelId === channelId);
+  });
+  messageInput.disabled = false;
+  send({ t: "community_channel_history", community: currentCommunityId, channel: channelId });
+}
+
+function renderCommunityHistory(items) {
+  messages.replaceChildren();
+  if (!items.length) messages.appendChild(makePlaceholder("Nessun messaggio in questo canale."));
+  items.forEach(item => appendCommunityMessage(item));
+  scrollBottom();
+}
+
+function appendCommunityMessage(item) {
+  if (!item || !item.text) return;
+  const div = document.createElement("div");
+  div.className = `msg ${item.from === me?.id ? "self" : "other"}`;
+  if (item.from !== me?.id) {
+    const author = document.createElement("strong");
+    author.className = "message-author";
+    const participant = currentCommunity?.participants?.find(person => person.id === item.from);
+    author.textContent = participant?.name || participant?.username || item.from;
+    div.appendChild(author);
+  }
+  div.append(document.createTextNode(item.text));
+  const metadata = document.createElement("span");
+  metadata.className = "meta";
+  metadata.textContent = item.timestamp
+    ? new Date(item.timestamp * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : "";
+  div.appendChild(metadata);
+  const placeholder = messages.querySelector(".msg-placeholder");
+  if (placeholder) placeholder.remove();
+  messages.appendChild(div);
+  scrollBottom();
+}
+
+function toggleInlineRoleEditor(row, participant, roles) {
+  const existing = row.querySelector(".inline-member-editor");
+  if (existing) {
+    existing.remove();
+    return;
+  }
+  const editor = document.createElement("div");
+  editor.className = "inline-member-editor";
+  const title = document.createElement("strong");
+  title.textContent = "Ruoli del membro";
+  const choices = document.createElement("div");
+  choices.className = "suggested-roles";
+  const selected = new Set((participant.roles || []).map(role => role.id));
+  Object.entries(roles).forEach(([roleId, role]) => {
+    if (roleId === "owner") return;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "suggested-role";
+    button.setAttribute("aria-pressed", String(selected.has(roleId)));
+    button.classList.toggle("selected", selected.has(roleId));
+    const check = document.createElement("i");
+    check.className = "ph ph-check";
+    check.classList.toggle("ph-bold", selected.has(roleId));
+    check.setAttribute("aria-hidden", "true");
+    const label = document.createElement("span");
+    label.textContent = role.name || roleId;
+    button.append(check, label);
+    button.addEventListener("click", () => {
+      if (selected.has(roleId)) selected.delete(roleId);
+      else selected.add(roleId);
+      button.classList.toggle("selected", selected.has(roleId));
+      button.setAttribute("aria-pressed", String(selected.has(roleId)));
+      check.classList.toggle("ph-bold", selected.has(roleId));
+    });
+    choices.appendChild(button);
+  });
+  const feedback = document.createElement("div");
+  feedback.className = "member-feedback";
+  const actions = document.createElement("div");
+  actions.className = "inline-editor-actions";
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "btn btn-primary small-btn";
+  save.textContent = "Salva ruoli";
+  save.addEventListener("click", () => {
+    const success = send({
+      t: "community_member_roles",
+      community: currentCommunityId,
+      user: participant.username || participant.id,
+      roles: Array.from(selected),
+    });
+    if (!success) {
+      feedback.textContent = "Connessione non disponibile. Riprova.";
+      feedback.className = "member-feedback error";
+      return;
+    }
+    memberActionPending = {
+      type: "roles",
+      retry: () => save.click(),
+      feedback,
+    };
+    feedback.textContent = "Salvataggio ruoli...";
+    feedback.className = "member-feedback";
+  });
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "btn btn-outline small-btn";
+  cancel.textContent = "Annulla";
+  cancel.addEventListener("click", () => editor.remove());
+  actions.append(save, cancel);
+  editor.append(title, choices, actions, feedback);
+  row.appendChild(editor);
+}
+
+function showInlineRemoveConfirmation(row, participant) {
+  if (row.querySelector(".inline-remove-confirm")) return;
+  const confirmation = document.createElement("div");
+  confirmation.className = "inline-remove-confirm";
+  const feedback = document.createElement("div");
+  feedback.className = "member-feedback";
+  feedback.setAttribute("role", "status");
+  const text = document.createElement("span");
+  text.textContent = `Remove ${participant.name || participant.username}?`;
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "btn btn-danger small-btn";
+  remove.innerHTML = '<i class="ph ph-trash" aria-hidden="true"></i> Remove';
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "btn btn-outline small-btn";
+  cancel.textContent = "Annulla";
+  cancel.addEventListener("click", () => confirmation.remove());
+  remove.addEventListener("click", () => {
+    const success = send({
+      t: "community_kick",
+      community: currentCommunityId,
+      user: participant.username || participant.id,
+    });
+    if (!success) {
+      confirmation.classList.add("error");
+      text.textContent = "Connessione non disponibile. Riprova.";
+      return;
+    }
+    memberActionPending = {
+      type: "remove",
+      retry: () => remove.click(),
+      feedback,
+    };
+    row.classList.add("removing");
+    text.textContent = "Rimozione in corso...";
+  });
+  confirmation.append(text, remove, cancel, feedback);
+  row.appendChild(confirmation);
+}
+
+function renderPendingInvitations(invitations) {
+  pendingInvitations = invitations || [];
+  const panel = el("pendingInvitations");
+  const list = el("pendingInvitationList");
+  list.replaceChildren();
+  panel.classList.toggle("hidden", !pendingInvitations.length);
+  pendingInvitations.forEach(invitation => {
+    const row = document.createElement("article");
+    row.className = "pending-invitation-row";
+    const message = document.createElement("span");
+    message.textContent = `${invitation.inviter} ti ha invitato in ${invitation.name}`;
+    const actions = document.createElement("div");
+    const accept = document.createElement("button");
+    accept.type = "button";
+    accept.className = "btn btn-primary small-btn";
+    accept.innerHTML = '<i class="ph ph-check" aria-hidden="true"></i> Accetta';
+    accept.addEventListener("click", () => send({
+      t: "community_invite_response", community: invitation.community, action: "accept",
+    }));
+    const decline = document.createElement("button");
+    decline.type = "button";
+    decline.className = "btn btn-outline small-btn";
+    decline.innerHTML = '<i class="ph ph-x" aria-hidden="true"></i> Rifiuta';
+    decline.addEventListener("click", () => send({
+      t: "community_invite_response", community: invitation.community, action: "decline",
+    }));
+    actions.append(accept, decline);
+    row.append(message, actions);
+    list.appendChild(row);
+  });
+}
+
 function avatarInitial(name) {
   return (name || "?").charAt(0).toUpperCase();
 }
 
 function selectContact(username) {
+  currentCommunityId = null;
+  currentCommunity = null;
+  currentChannelId = null;
+  selectedInviteRoles.clear();
+  el("memberInvitePanel").classList.add("hidden");
+  el("participantIndexTitle").textContent = "Participants - Direct message";
+  el("participantCount").textContent = "0";
+  el("visibleParticipantCount").textContent = "0 members";
+  participantDirectory.replaceChildren();
+  el("communityChannelBar").classList.add("hidden");
+  renderCommunityList(communityListData);
   selectedContact = username;
   convStatus.textContent = username;
   renderSelectedContact();
@@ -314,10 +840,600 @@ function openProfileModal() {
   profileStatus.className = "";
   renderProfilePreview();
   profileModal.classList.remove("hidden");
+  send({ t: "settings_get" });
+  send({ t: "community_list" });
+  populateLocalSettings();
 }
 
 function closeProfileModal() {
   profileModal.classList.add("hidden");
+}
+
+function switchSettingsSection(section) {
+  document.querySelectorAll("[data-settings-section]").forEach(button => {
+    button.classList.toggle("active", button.dataset.settingsSection === section);
+  });
+  document.querySelectorAll("[data-settings-panel]").forEach(panel => {
+    panel.classList.toggle("active", panel.dataset.settingsPanel === section);
+  });
+  const titles = {
+    account: "Gestisci il tuo profilo e account.",
+    privacy: "Controlla chi può contattarti e cosa puoi vedere.",
+    voice: "Configura dispositivi, volume e elaborazione audio.",
+    notifications: "Scegli quali avvisi e suoni ricevere.",
+    appearance: "Personalizza tema, testo e densità.",
+    keybinds: "Assegna combinazioni rapide.",
+    community: "Configura gruppi e canali amministrabili.",
+  };
+  el("settingsSubtitle").textContent = titles[section] || "Gestisci le impostazioni.";
+}
+
+function populateLocalSettings() {
+  el("themeSelect").value = localSettings.theme;
+  el("fontSize").value = localSettings.fontSize;
+  el("fontSizeOut").textContent = `${localSettings.fontSize}%`;
+  el("reducedMotion").checked = localSettings.reducedMotion;
+  el("linkPreviews").checked = localSettings.linkPreviews;
+  el("inlineImages").checked = localSettings.inlineImages;
+  el("autoEmoji").checked = localSettings.autoEmoji;
+  el("desktopNotifications").checked = localSettings.desktopNotifications;
+  el("unreadBadge").checked = localSettings.unreadBadge;
+  el("soundMessage").checked = localSettings.soundMessage;
+  el("soundCall").checked = localSettings.soundCall;
+  el("soundMute").checked = localSettings.soundMute;
+  el("doNotDisturb").checked = localSettings.doNotDisturb;
+  el("inputVolume").value = localSettings.inputVolume;
+  el("outputVolume").value = localSettings.outputVolume;
+  el("inputVolumeOut").textContent = `${localSettings.inputVolume}%`;
+  el("outputVolumeOut").textContent = `${localSettings.outputVolume}%`;
+  el("voiceSensitivity").value = localSettings.voiceSensitivity;
+  el("voiceSensitivityOut").textContent = localSettings.voiceSensitivity;
+  el("echoCancel").checked = localSettings.echoCancel;
+  el("noiseSuppress").checked = localSettings.noiseSuppress;
+  el("autoGain").checked = localSettings.autoGain;
+  el("voiceActivity").checked = localSettings.inputMode === "voice";
+  el("pushToTalk").checked = localSettings.inputMode === "ptt";
+  document.querySelectorAll("[data-density]").forEach(button => {
+    button.classList.toggle("active", button.dataset.density === localSettings.density);
+  });
+  document.querySelectorAll("[data-keybind]").forEach(button => {
+    const value = localSettings.keybinds[button.dataset.keybind];
+    button.textContent = value || "Non impostato";
+  });
+  applyLiveAppearance();
+  enumerateMediaDevices();
+}
+
+function collectLocalSettings() {
+  return {
+    theme: el("themeSelect").value,
+    density: document.querySelector("[data-density].active")?.dataset.density || "cozy",
+    fontSize: Number(el("fontSize").value),
+    reducedMotion: el("reducedMotion").checked,
+    linkPreviews: el("linkPreviews").checked,
+    inlineImages: el("inlineImages").checked,
+    autoEmoji: el("autoEmoji").checked,
+    desktopNotifications: el("desktopNotifications").checked,
+    unreadBadge: el("unreadBadge").checked,
+    soundMessage: el("soundMessage").checked,
+    soundCall: el("soundCall").checked,
+    soundMute: el("soundMute").checked,
+    doNotDisturb: el("doNotDisturb").checked,
+    audioInput: el("audioInput").value,
+    audioOutput: el("audioOutput").value,
+    videoInput: el("videoInput").value,
+    inputVolume: Number(el("inputVolume").value),
+    outputVolume: Number(el("outputVolume").value),
+    inputMode: el("pushToTalk").checked ? "ptt" : "voice",
+    voiceSensitivity: Number(el("voiceSensitivity").value),
+    echoCancel: el("echoCancel").checked,
+    noiseSuppress: el("noiseSuppress").checked,
+    autoGain: el("autoGain").checked,
+    keybinds: { ...localSettings.keybinds },
+  };
+}
+
+function applyLiveAppearance() {
+  document.body.classList.remove("theme-oled", "theme-light", "message-compact", "reduced-motion");
+  if (localSettings.theme === "oled") document.body.classList.add("theme-oled");
+  if (localSettings.theme === "light") document.body.classList.add("theme-light");
+  if (localSettings.density === "compact") document.body.classList.add("message-compact");
+  if (localSettings.reducedMotion) document.body.classList.add("reduced-motion");
+  document.documentElement.style.fontSize = `${localSettings.fontSize}%`;
+  if ("setAppBadge" in navigator && localSettings.unreadBadge) navigator.setAppBadge(0).catch(() => {});
+  if ("clearAppBadge" in navigator && !localSettings.unreadBadge) navigator.clearAppBadge().catch(() => {});
+}
+
+function markUnsaved() {
+  el("unsavedBar").classList.remove("hidden");
+}
+
+function saveSettings() {
+  localSettings = collectLocalSettings();
+  localStorage.setItem("ciaochat.settings", JSON.stringify(localSettings));
+  applyLiveAppearance();
+
+  send({
+    t: "account_update",
+    username: el("accountUsername").value.trim(),
+    display_name: el("accountDisplayName").value.trim(),
+    email: el("accountEmail").value.trim(),
+    bio: el("accountBio").value.trim(),
+    status: el("accountStatus").value.trim(),
+    status_expires_in: Number(el("accountStatusExpiration").value),
+    current_password: el("currentPassword").value,
+  });
+  send({
+    t: "privacy_update",
+    dm_policy: el("dmPolicy").value,
+    friend_request_policy: el("friendPolicy").value,
+    media_filter: el("mediaFilter").checked,
+  });
+  send({
+    t: "settings_update",
+    notifications: {
+      desktop: localSettings.desktopNotifications,
+      badge: localSettings.unreadBadge,
+      incoming_message: localSettings.soundMessage,
+      call_ring: localSettings.soundCall,
+      mute_unmute: localSettings.soundMute,
+      dnd: localSettings.doNotDisturb,
+    },
+    appearance: {
+      theme: localSettings.theme,
+      message_density: localSettings.density,
+      font_scale: localSettings.fontSize,
+      reduced_motion: localSettings.reducedMotion,
+      link_previews: localSettings.linkPreviews,
+      inline_embeds: localSettings.inlineImages,
+      auto_emoji: localSettings.autoEmoji,
+    },
+    keybinds: localSettings.keybinds,
+  });
+  send({ t: "profile_customization", name_color: el("nameColor").value, name_animation: el("nameAnimation").value });
+  el("unsavedBar").classList.add("hidden");
+  el("profileStatus").textContent = "Salvataggio...";
+  el("profileStatus").className = "settings-status";
+}
+
+function resetSettings() {
+  populateSettingsSnapshot(settingsSnapshot);
+  populateLocalSettings();
+  el("unsavedBar").classList.add("hidden");
+}
+
+function populateSettingsSnapshot(snapshot) {
+  if (!snapshot) return;
+  settingsSnapshot = snapshot;
+  const account = snapshot.account || {};
+  el("accountUsername").value = account.username || "";
+  el("accountDisplayName").value = account.display_name || account.username || "";
+  el("accountEmail").value = account.email || "";
+  el("accountPhone").value = account.phone || "";
+  el("accountBio").value = account.bio || "";
+  el("accountStatus").value = account.status || "";
+  el("accountStatusExpiration").value = "0";
+  el("nameColor").value = me?.name_color || "#f1f5f9";
+  el("nameAnimation").value = me?.name_animation || "none";
+  el("dmPolicy").value = snapshot.privacy?.dm_policy || "everyone";
+  const friendPolicy = snapshot.privacy?.friend_request_policy || "everyone";
+  el("friendPolicy").value = friendPolicy === "friends_of_friends" ? "mutuals" : friendPolicy;
+  el("mediaFilter").checked = snapshot.privacy?.media_filter !== false;
+  el("twoFactorBtn").textContent = snapshot.two_factor_enabled ? "Disattiva 2FA" : "Configura 2FA";
+  renderSessions(snapshot.sessions || []);
+  renderBlocked(snapshot.blocked || []);
+  renderProfilePreview();
+}
+
+function renderSessions(sessions) {
+  const container = el("sessionsList");
+  container.innerHTML = "";
+  if (!sessions.length) {
+    container.innerHTML = '<div class="settings-list-item muted">Nessuna sessione registrata.</div>';
+    return;
+  }
+  sessions.forEach(session => {
+    const item = document.createElement("div");
+    item.className = "settings-list-item";
+    item.innerHTML = `<span>${session.current ? "<strong>Questa sessione</strong>" : "Sessione"}<br><small class=\"muted\">${new Date((session.created || 0) * 1000).toLocaleString()}</small></span>`;
+    const button = document.createElement("button");
+    button.className = "btn btn-outline";
+    button.textContent = "Disconnetti";
+    button.onclick = () => send({ t: "session_revoke", session: session.id });
+    item.appendChild(button);
+    container.appendChild(item);
+  });
+}
+
+function renderBlocked(blocked) {
+  const container = el("blockedUsersList");
+  container.innerHTML = "";
+  if (!blocked.length) {
+    container.innerHTML = '<div class="settings-list-item muted">Nessun utente bloccato.</div>';
+    return;
+  }
+  blocked.forEach(profile => {
+    const item = document.createElement("div");
+    item.className = "settings-list-item";
+    item.innerHTML = `<span><strong>${profile.name || profile.username}</strong><small class="muted">@${profile.username}</small></span>`;
+    const button = document.createElement("button");
+    button.className = "btn btn-outline";
+    button.textContent = "Sblocca";
+    button.onclick = () => send({ t: "block_update", user: profile.username, action: "unblock" });
+    item.appendChild(button);
+    container.appendChild(item);
+  });
+}
+
+async function enumerateMediaDevices() {
+  if (!navigator.mediaDevices?.enumerateDevices) return;
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    ["audioInput", "audioOutput", "videoInput"].forEach(id => el(id).innerHTML = "");
+    devices.forEach((device, index) => {
+      const option = document.createElement("option");
+      option.value = device.deviceId;
+      option.textContent = device.label || `${device.kind} ${index + 1}`;
+      if (device.kind === "audioinput") el("audioInput").appendChild(option);
+      if (device.kind === "audiooutput") el("audioOutput").appendChild(option);
+      if (device.kind === "videoinput") el("videoInput").appendChild(option);
+    });
+    if (localSettings.audioInput) el("audioInput").value = localSettings.audioInput;
+    if (localSettings.audioOutput) el("audioOutput").value = localSettings.audioOutput;
+    if (localSettings.videoInput) el("videoInput").value = localSettings.videoInput;
+  } catch {
+    el("profileStatus").textContent = "Consenti l'accesso ai dispositivi per visualizzarne l'elenco.";
+  }
+}
+
+let micLoopbackStream = null;
+async function toggleMicLoopback(enabled) {
+  if (!enabled) {
+    micLoopbackStream?.getTracks().forEach(track => track.stop());
+    micLoopbackStream = null;
+    el("micLoopbackAudio").pause();
+    el("micLoopbackAudio").srcObject = null;
+    return;
+  }
+  if (!navigator.mediaDevices?.getUserMedia) return;
+  try {
+    micLoopbackStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        deviceId: el("audioInput").value ? { exact: el("audioInput").value } : undefined,
+        echoCancellation: el("echoCancel").checked,
+        noiseSuppression: el("noiseSuppress").checked,
+        autoGainControl: el("autoGain").checked,
+      },
+      video: false,
+    });
+    el("micLoopbackAudio").srcObject = micLoopbackStream;
+    el("micLoopbackAudio").muted = false;
+    await el("micLoopbackAudio").play();
+  } catch {
+    el("micLoopback").checked = false;
+    el("profileStatus").textContent = "Impossibile avviare il test del microfono.";
+  }
+}
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, char => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[char]);
+}
+
+function renderCommunityNav(communities) {
+  const nav = el("communitySettingsNav");
+  nav.innerHTML = "";
+  (communities || []).filter(community => community.can_manage).forEach(community => {
+    const button = document.createElement("button");
+    button.className = "settings-nav";
+    button.dataset.settingsSection = "community";
+    button.dataset.communityId = community.id;
+    button.textContent = community.name || "Community";
+    button.onclick = () => {
+      switchSettingsSection("community");
+      send({ t: "community_get", community: community.id });
+    };
+    nav.appendChild(button);
+  });
+  if (!nav.children.length) {
+    const empty = document.createElement("div");
+    empty.className = "muted";
+    empty.style.padding = "8px 10px";
+    empty.style.fontSize = "0.78rem";
+    empty.textContent = "Nessun gruppo amministrabile";
+    nav.appendChild(empty);
+  }
+}
+
+function renderCommunitySnapshot(data) {
+  communitySnapshot = data;
+  const permissions = data.permissions || {};
+  if (!permissions.manage_community && !permissions.administrator) {
+    el("communitySettingsContent").innerHTML = '<h3>Accesso negato</h3><p class="muted">Non hai i permessi per modificare questa community.</p>';
+    return;
+  }
+  const channels = data.channels || [];
+  const roles = data.roles || {};
+  const invites = data.invites || {};
+  const bans = data.bans || {};
+  const audit = data.audit || [];
+  const roleEntries = Object.entries(roles).sort((a, b) => (b[1].position || 0) - (a[1].position || 0));
+  const permissionNames = [
+    "view_channels", "send_messages", "attach_files", "manage_messages", "manage_channels",
+    "manage_roles", "manage_community", "kick_members", "ban_members", "administrator",
+  ];
+
+  el("communitySettingsContent").innerHTML = `
+    <h3>${escapeHtml(data.name)}</h3>
+    <div class="community-tabs">
+      <button class="community-tab active" data-community-sub="overview">Panoramica</button>
+      ${permissions.manage_roles || permissions.administrator ? '<button class="community-tab" data-community-sub="roles">Ruoli</button>' : ""}
+      ${permissions.manage_channels || permissions.administrator ? '<button class="community-tab" data-community-sub="channels">Canali</button>' : ""}
+      ${permissions.create_invites || permissions.administrator ? '<button class="community-tab" data-community-sub="invites">Inviti &amp; ban</button>' : ""}
+      ${permissions.view_audit_log || permissions.administrator ? '<button class="community-tab" data-community-sub="audit">Audit log</button>' : ""}
+    </div>
+    <div class="community-subpanel active" data-community-panel="overview">
+      <div class="settings-grid">
+        <div class="setting-field"><label>Nome gruppo</label><input id="communityName" value="${escapeHtml(data.name)}" maxlength="64"></div>
+        <div class="setting-field"><label>Notifiche predefinite</label><select id="communityNotification"><option value="all" ${data.default_notification === "all" ? "selected" : ""}>Tutti i messaggi</option><option value="mentions" ${data.default_notification === "mentions" ? "selected" : ""}>Solo menzioni</option></select></div>
+        <div class="setting-field"><label>Icona</label><input id="communityIconFile" type="file" accept=".jpg,.png,.webp,.gif"></div>
+        <div class="setting-field"><label>Banner</label><input id="communityBannerFile" type="file" accept=".jpg,.png,.webp,.mp4,.gif"></div>
+        <div class="setting-field full"><label>Canale di benvenuto</label><select id="communityWelcome">${channels.map(channel => `<option value="${escapeHtml(channel.id)}" ${channel.id === data.welcome_channel ? "selected" : ""}>${escapeHtml(channel.name)}</option>`).join("")}</select></div>
+      </div>
+      <button class="btn btn-primary small-btn" id="saveCommunityOverview" type="button">Salva panoramica</button>
+    </div>
+    <div class="community-subpanel" data-community-panel="roles">
+      <div class="role-list" id="communityRoleList">${roleEntries.map(([id, role]) => id !== "everyone" && id !== "owner" ? `
+        <div class="role-item" draggable="true" data-role-id="${escapeHtml(id)}">
+          <span class="role-dot" style="background:${escapeHtml(role.color)}"></span>
+          <strong>${escapeHtml(role.name)}</strong>
+          <button class="btn btn-outline small-btn role-edit" type="button" data-role-id="${escapeHtml(id)}">Modifica</button>
+          <button class="btn btn-outline small-btn role-delete" type="button" data-role-id="${escapeHtml(id)}">Elimina</button>
+        </div>` : "").join("")}</div>
+      <button class="btn btn-outline small-btn" id="createRoleBtn" type="button" style="margin-top:10px">Crea ruolo</button>
+      <div id="roleEditor" class="settings-card"></div>
+    </div>
+    <div class="community-subpanel" data-community-panel="channels">
+      ${channels.map(channel => `
+        <div class="settings-card">
+          <div class="settings-grid">
+            <div class="setting-field"><label>Nome canale</label><input class="channel-name" data-channel="${escapeHtml(channel.id)}" value="${escapeHtml(channel.name)}"></div>
+            <div class="setting-field"><label>Argomento</label><input class="channel-topic" data-channel="${escapeHtml(channel.id)}" value="${escapeHtml(channel.topic || "")}"></div>
+          </div>
+          <label class="range-row"><span>Slowmode: <output class="slowmode-output">${channel.slowmode || 0}s</output></span><input class="channel-slowmode" data-channel="${escapeHtml(channel.id)}" type="range" min="0" max="3600" step="1" value="${channel.slowmode || 0}"></label>
+          <button class="btn btn-primary small-btn save-channel" data-channel="${escapeHtml(channel.id)}" type="button">Salva canale</button>
+          <button class="btn btn-outline small-btn delete-channel" data-channel="${escapeHtml(channel.id)}" type="button">Elimina</button>
+          <h4 style="margin-top:14px">Override ruoli</h4>
+          ${roleEntries.filter(([id]) => id !== "everyone").map(([roleId, role]) => {
+            const override = (channel.overrides && channel.overrides[roleId]) || {};
+            return `<div class="setting-row"><strong style="color:${escapeHtml(role.color)}">${escapeHtml(role.name)}</strong><div class="tri-toggle" data-role="${escapeHtml(roleId)}" data-channel="${escapeHtml(channel.id)}">${permissionNames.slice(0, 5).map(permission => `<button type="button" data-permission="${permission}" data-state="${override[permission] || "inherit"}" title="${permission}">${permission.replace(/_/g," ").replace("messages","msg.")}</button>`).join("")}</div></div>`;
+          }).join("")}
+          <button class="btn btn-outline small-btn apply-overrides" data-channel="${escapeHtml(channel.id)}" type="button">Applica override</button>
+        </div>`).join("")}
+      <button class="btn btn-outline small-btn" id="createChannelBtn" type="button" style="margin-top:10px">Crea canale</button>
+    </div>
+    <div class="community-subpanel" data-community-panel="invites">
+      <button class="btn btn-outline small-btn" id="createInviteBtn" type="button">Crea invito</button>
+      <div class="table-wrap" style="margin-top:12px"><table class="settings-table"><thead><tr><th>Codice</th><th>Utilizzi</th><th>Scadenza</th><th></th></tr></thead><tbody>${Object.entries(invites).map(([code, invite]) => `<tr><td>${escapeHtml(code)}</td><td>${invite.uses || 0}/${invite.max_uses || "∞"}</td><td>${invite.expires ? new Date(invite.expires * 1000).toLocaleString() : "Mai"}</td><td><button class="btn btn-outline small-btn revoke-invite" data-code="${escapeHtml(code)}">Revoca</button></td></tr>`).join("")}</tbody></table></div>
+      <h4 style="margin-top:18px">Utenti bannati</h4>
+      <div class="settings-list">${Object.entries(bans).map(([user, ban]) => `<div class="settings-list-item"><span><strong>${escapeHtml(user)}</strong><small class="muted">${escapeHtml(ban.reason || "")}</small></span><button class="btn btn-outline small-btn unban-user" data-user="${escapeHtml(user)}">Rimuovi ban</button></div>`).join("") || '<span class="muted">Nessun utente bannato.</span>'}</div>
+    </div>
+    <div class="community-subpanel" data-community-panel="audit">
+      <input id="auditFilter" type="search" placeholder="Filtra azioni..." style="width:100%;padding:9px;border:1px solid var(--border);border-radius:8px;background:#0f172a;margin-bottom:10px">
+      <div class="settings-list">${audit.map(event => `<div class="settings-list-item audit-event" data-action="${escapeHtml(event.action)}"><span><strong>${escapeHtml(event.action)}</strong><small class="muted">${escapeHtml(event.actor)} · ${new Date((event.timestamp || 0) * 1000).toLocaleString()}</small></span></div>`).join("") || '<span class="muted">Nessuna attività registrata.</span>'}</div>
+    </div>
+  `;
+  bindCommunityControls(data);
+}
+
+function bindCommunityControls(data) {
+  document.querySelectorAll("[data-community-sub]").forEach(tab => {
+    tab.onclick = () => {
+      document.querySelectorAll("[data-community-sub]").forEach(item => item.classList.toggle("active", item === tab));
+      document.querySelectorAll("[data-community-panel]").forEach(panel => {
+        panel.classList.toggle("active", panel.dataset.communityPanel === tab.dataset.communitySub);
+      });
+    };
+  });
+
+  el("saveCommunityOverview")?.addEventListener("click", () => {
+    send({
+      t: "community_update",
+      community: data.id,
+      name: el("communityName").value,
+      default_notification: el("communityNotification").value,
+      welcome_channel: el("communityWelcome").value,
+    });
+  });
+  ["communityIconFile", "communityBannerFile"].forEach(id => {
+    el(id)?.addEventListener("change", event => {
+      const file = event.target.files[0];
+      if (!file) return;
+      const extension = /\.([^.]+)$/.exec(file.name)?.[1].toLowerCase();
+      if (!extension) return;
+      const reader = new FileReader();
+      reader.onload = () => send({
+        t: "media_put",
+        community: data.id,
+        kind: id === "communityIconFile" ? "community_icon" : "community_banner",
+        extension,
+        data: String(reader.result).split(",", 2)[1],
+      });
+      reader.readAsDataURL(file);
+    });
+  });
+
+  el("createChannelBtn")?.addEventListener("click", () => {
+    const name = prompt("Nome del nuovo canale:");
+    if (name) send({ t: "community_channel_create", community: data.id, name });
+  });
+  document.querySelectorAll(".save-channel").forEach(button => {
+    button.onclick = () => {
+      const channelId = button.dataset.channel;
+      send({
+        t: "community_channel_update",
+        community: data.id,
+        channel: channelId,
+        name: document.querySelector(`.channel-name[data-channel="${channelId}"]`).value,
+        topic: document.querySelector(`.channel-topic[data-channel="${channelId}"]`).value,
+        slowmode: Number(document.querySelector(`.channel-slowmode[data-channel="${channelId}"]`).value),
+      });
+    };
+  });
+  document.querySelectorAll(".channel-slowmode").forEach(slider => {
+    slider.oninput = () => {
+      slider.closest(".settings-card").querySelector(".slowmode-output").textContent = `${slider.value}s`;
+    };
+  });
+  document.querySelectorAll(".delete-channel").forEach(button => {
+    button.onclick = () => {
+      if (confirm("Eliminare questo canale?")) send({
+        t: "community_channel_delete", community: data.id, channel: button.dataset.channel,
+      });
+    };
+  });
+
+  document.querySelectorAll(".tri-toggle").forEach(toggle => {
+    toggle.querySelectorAll("button").forEach(button => {
+      const states = ["inherit", "allow", "deny"];
+      const stateIndex = states.indexOf(button.dataset.state);
+      if (stateIndex >= 0) button.classList.add("active", states[stateIndex]);
+      button.onclick = () => {
+        button.dataset.state = button.dataset.state === "inherit"
+          ? "allow"
+          : button.dataset.state === "allow"
+            ? "deny"
+            : "inherit";
+        toggle.querySelectorAll("button").forEach(item => item.classList.remove("active", "allow", "deny", "inherit"));
+        button.classList.add("active", button.dataset.state);
+      };
+    });
+  });
+  document.querySelectorAll(".apply-overrides").forEach(button => {
+    button.onclick = () => {
+      const toggles = document.querySelectorAll(`.tri-toggle[data-channel="${button.dataset.channel}"]`);
+      toggles.forEach(toggle => {
+        const overrides = {};
+        toggle.querySelectorAll("button").forEach(permission => {
+          overrides[permission.dataset.permission] = permission.dataset.state;
+        });
+        send({
+          t: "community_override_update",
+          community: data.id,
+          channel: button.dataset.channel,
+          role: toggle.dataset.role,
+          overrides,
+        });
+      });
+    };
+  });
+
+  el("createRoleBtn")?.addEventListener("click", () => {
+    el("roleEditor").innerHTML = `
+      <div class="settings-grid">
+        <div class="setting-field"><label>Nome ruolo</label><input id="newRoleName"></div>
+        <div class="setting-field"><label>Colore</label><input id="newRoleColor" type="color" value="#5865f2"></div>
+        <label class="toggle-row full"><span><strong>Mostra separatamente</strong></span><input id="newRoleSeparate" type="checkbox"><span class="toggle"></span></label>
+      </div>
+      <button class="btn btn-primary small-btn" id="saveNewRole" type="button">Crea</button>`;
+    el("saveNewRole").onclick = () => {
+      const permissions = {};
+      [
+        "view_channels", "send_messages", "attach_files", "manage_messages", "manage_channels",
+        "manage_roles", "manage_community", "kick_members", "ban_members", "administrator",
+      ].forEach(permission => { permissions[permission] = false; });
+      send({
+        t: "community_role_create",
+        community: data.id,
+        name: el("newRoleName").value,
+        color: el("newRoleColor").value,
+        display_separately: el("newRoleSeparate").checked,
+        permissions,
+      });
+    };
+  });
+  document.querySelectorAll(".role-edit").forEach(button => {
+    button.onclick = () => {
+      const role = data.roles[button.dataset.roleId];
+      const permissionNames = [
+        "view_channels", "send_messages", "attach_files", "manage_messages", "manage_channels",
+        "manage_roles", "manage_community", "kick_members", "ban_members", "administrator",
+      ];
+      el("roleEditor").innerHTML = `
+        <div class="settings-grid">
+          <div class="setting-field"><label>Nome ruolo</label><input id="editRoleName" value="${escapeHtml(role.name)}"></div>
+          <div class="setting-field"><label>Colore</label><input id="editRoleColor" type="color" value="${escapeHtml(role.color)}"></div>
+        </div>
+        <label class="toggle-row"><span><strong>Mostra separatamente</strong></span><input id="editRoleSeparate" type="checkbox" ${role.display_separately ? "checked" : ""}><span class="toggle"></span></label>
+        <div class="permission-grid">${permissionNames.map(permission => `<label><input type="checkbox" class="role-permission" value="${permission}" ${role.permissions?.[permission] ? "checked" : ""}>${permission.replace(/_/g, " ")}</label>`).join("")}</div>
+        <button class="btn btn-primary small-btn" id="saveRoleEdit" type="button" style="margin-top:12px">Salva ruolo</button>`;
+      el("saveRoleEdit").onclick = () => {
+        const permissions = {};
+        permissionNames.forEach(permission => {
+          permissions[permission] = !!document.querySelector(`.role-permission[value="${permission}"]`)?.checked;
+        });
+        send({
+          t: "community_role_update",
+          community: data.id,
+          role: button.dataset.roleId,
+          name: el("editRoleName").value,
+          color: el("editRoleColor").value,
+          display_separately: el("editRoleSeparate").checked,
+          permissions,
+        });
+      };
+    };
+  });
+  document.querySelectorAll(".role-delete").forEach(button => {
+    button.onclick = () => {
+      if (confirm("Eliminare questo ruolo?")) send({
+        t: "community_role_delete", community: data.id, role: button.dataset.roleId,
+      });
+    };
+  });
+
+  const roleList = el("communityRoleList");
+  roleList?.querySelectorAll(".role-item").forEach(item => {
+    item.addEventListener("dragstart", () => item.classList.add("dragging"));
+    item.addEventListener("dragend", () => {
+      item.classList.remove("dragging");
+      const roles = Array.from(roleList.querySelectorAll(".role-item")).map(entry => entry.dataset.roleId);
+      send({ t: "community_roles_reorder", community: data.id, roles });
+    });
+  });
+  roleList?.addEventListener("dragover", event => {
+    event.preventDefault();
+    const dragging = roleList.querySelector(".dragging");
+    const target = event.target.closest(".role-item");
+    if (!dragging || !target || target === dragging) return;
+    const rect = target.getBoundingClientRect();
+    if (event.clientY < rect.top + rect.height / 2) {
+      roleList.insertBefore(dragging, target);
+    } else {
+      roleList.insertBefore(dragging, target.nextSibling);
+    }
+  });
+
+  el("createInviteBtn")?.addEventListener("click", () => {
+    send({ t: "community_invite_create", community: data.id, max_uses: 0, expires_in: 604800 });
+  });
+  document.querySelectorAll(".revoke-invite").forEach(button => {
+    button.onclick = () => send({
+      t: "community_invite_revoke", community: data.id, code: button.dataset.code,
+    });
+  });
+  document.querySelectorAll(".unban-user").forEach(button => {
+    button.onclick = () => send({
+      t: "community_unban", community: data.id, user: button.dataset.user,
+    });
+  });
+  el("auditFilter")?.addEventListener("input", event => {
+    const filter = event.target.value.toLowerCase();
+    document.querySelectorAll(".audit-event").forEach(row => {
+      row.style.display = row.dataset.action.toLowerCase().includes(filter) ? "" : "none";
+    });
+  });
 }
 
 function expireSession(message) {
@@ -374,16 +1490,92 @@ el("closeProfileModal").addEventListener("click", closeProfileModal);
 profileModal.addEventListener("click", event => {
   if (event.target === profileModal) closeProfileModal();
 });
+
+document.querySelectorAll("[data-settings-section]").forEach(button => {
+  button.addEventListener("click", () => switchSettingsSection(button.dataset.settingsSection));
+});
+el("saveSettingsBtn").addEventListener("click", saveSettings);
+el("resetSettingsBtn").addEventListener("click", resetSettings);
+el("unsavedBar").addEventListener("input", markUnsaved);
+el("unsavedBar").closest(".settings-main").addEventListener("input", markUnsaved);
+el("unsavedBar").closest(".settings-main").addEventListener("change", markUnsaved);
+
+el("changePasswordBtn").addEventListener("click", () => {
+  send({
+    t: "password_change",
+    current_password: el("currentPassword").value,
+    new_password: el("newPassword").value,
+  });
+});
+el("twoFactorBtn").addEventListener("click", () => {
+  if (settingsSnapshot?.two_factor_enabled) {
+    const password = prompt("Password attuale:");
+    const code = prompt("Codice 2FA a 6 cifre:");
+    if (password && code) send({ t: "two_factor_disable", password, code });
+  } else {
+    send({ t: "two_factor_setup" });
+  }
+});
+el("micLoopback").addEventListener("change", event => toggleMicLoopback(event.target.checked));
+
+el("desktopNotifications").addEventListener("change", async event => {
+  if (event.target.checked && "Notification" in window && Notification.permission !== "granted") {
+    try { await Notification.requestPermission(); } catch {}
+  }
+});
+el("themeSelect").addEventListener("change", () => {
+  localSettings = collectLocalSettings();
+  applyLiveAppearance();
+});
+el("fontSize").addEventListener("input", () => {
+  el("fontSizeOut").textContent = `${el("fontSize").value}%`;
+  localSettings = collectLocalSettings();
+  applyLiveAppearance();
+});
+el("inputVolume").addEventListener("input", () => {
+  el("inputVolumeOut").textContent = `${el("inputVolume").value}%`;
+});
+el("outputVolume").addEventListener("input", () => {
+  el("outputVolumeOut").textContent = `${el("outputVolume").value}%`;
+});
+el("voiceSensitivity").addEventListener("input", () => {
+  el("voiceSensitivityOut").textContent = el("voiceSensitivity").value;
+});
+document.querySelectorAll("[data-density]").forEach(button => {
+  button.addEventListener("click", () => {
+    document.querySelectorAll("[data-density]").forEach(item => item.classList.remove("active"));
+    button.classList.add("active");
+    markUnsaved();
+  });
+});
+document.querySelectorAll("[data-keybind]").forEach(button => {
+  button.addEventListener("click", () => {
+    button.classList.add("recording");
+    button.textContent = "Premi una combinazione...";
+    const capture = event => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (["Control", "Shift", "Alt", "Meta"].includes(event.key)) return;
+      const keys = [];
+      if (event.ctrlKey) keys.push("Ctrl");
+      if (event.shiftKey) keys.push("Shift");
+      if (event.altKey) keys.push("Alt");
+      if (event.metaKey) keys.push("Meta");
+      keys.push(event.key.length === 1 ? event.key.toUpperCase() : event.key);
+      localSettings.keybinds[button.dataset.keybind] = keys.join("+");
+      button.textContent = keys.join("+");
+      button.classList.remove("recording");
+      markUnsaved();
+      window.removeEventListener("keydown", capture, true);
+    };
+    window.addEventListener("keydown", capture, true);
+  });
+});
 nameColor.addEventListener("input", () => {
   styleName(profilePreviewName, { ...me, name_color: nameColor.value });
 });
 nameAnimation.addEventListener("change", () => {
   styleName(profilePreviewName, { ...me, name_animation: nameAnimation.value });
-});
-el("saveProfileStyle").addEventListener("click", () => {
-  send({ t: "profile_customization", name_color: nameColor.value, name_animation: nameAnimation.value });
-  profileStatus.textContent = "Salvataggio...";
-  profileStatus.className = "";
 });
 el("avatarFile").addEventListener("change", event => {
   const file = event.target.files[0];
@@ -403,11 +1595,148 @@ document.querySelectorAll("[data-clear-media]").forEach(button => {
   });
 });
 
-newChatBtn.onclick = () => {
-  const username = prompt("Username del contatto da aggiungere:");
-  if (!username) return;
-  send({ t: "add_contact", username });
-};
+newChatBtn.onclick = () => el("quickContactInput").focus();
+
+function submitQuickContact() {
+  const input = el("quickContactInput");
+  const identifier = input.value.trim();
+  const feedback = el("quickContactFeedback");
+  if (!identifier) {
+    feedback.textContent = "Inserisci uno username o un numero.";
+    feedback.className = "error";
+    input.focus();
+    return;
+  }
+  if (!send({ t: "add_contact", query: identifier })) {
+    feedback.textContent = "Connessione non disponibile. Riprova.";
+    feedback.className = "error";
+    return;
+  }
+  quickContactPending = true;
+  feedback.textContent = "Ricerca contatto...";
+  feedback.className = "";
+}
+
+el("quickContactAddBtn").addEventListener("click", submitQuickContact);
+el("quickContactInput").addEventListener("keydown", event => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    submitQuickContact();
+  }
+});
+el("createCommunityBtn").addEventListener("click", () => {
+  const input = el("newCommunityName");
+  const name = input.value.trim();
+  if (!name) {
+    input.setCustomValidity("Inserisci il nome del gruppo.");
+    input.reportValidity();
+    return;
+  }
+  input.setCustomValidity("");
+  send({ t: "community_create", name });
+});
+el("newCommunityName").addEventListener("input", event => event.target.setCustomValidity(""));
+
+function submitMemberInvite() {
+  const input = el("memberIdentifier");
+  const identifier = input.value.trim();
+  const feedback = el("memberInviteFeedback");
+  feedback.replaceChildren();
+  feedback.className = "member-feedback";
+  if (!currentCommunityId || !currentCommunity) {
+    feedback.textContent = "Seleziona prima un gruppo.";
+    feedback.classList.add("error");
+    return;
+  }
+  if (!identifier) {
+    feedback.textContent = "Enter an email or username.";
+    feedback.classList.add("error");
+    input.focus();
+    return;
+  }
+  const looksLikeEmail = identifier.includes("@");
+  const validIdentifier = looksLikeEmail
+    ? /^[^@\s]{1,64}@[^@\s.]+(?:\.[^@\s.]+)+$/.test(identifier)
+    : /^(?=.*[A-Za-z])[A-Za-z0-9]{3,20}$/.test(identifier.replace(/^@/, ""));
+  if (!validIdentifier) {
+    feedback.textContent = "Enter a valid email or a 3-20 character username.";
+    feedback.classList.add("error");
+    input.focus();
+    return;
+  }
+  const roleMap = currentCommunity.roles || {};
+  const invalidRole = Array.from(selectedInviteRoles).some(roleId => !roleMap[roleId]);
+  if (invalidRole) {
+    feedback.textContent = "Aggiorna la selezione: uno dei ruoli non è più disponibile.";
+    feedback.classList.add("error");
+    send({ t: "community_get", community: currentCommunityId });
+    return;
+  }
+  const payload = {
+    t: "community_member_invite",
+    community: currentCommunityId,
+    identifier,
+    roles: Array.from(selectedInviteRoles),
+  };
+  if (!send(payload)) {
+    feedback.textContent = "Connessione non disponibile. Riprova.";
+    feedback.classList.add("error");
+    return;
+  }
+  memberActionPending = {
+    type: "invite",
+    retry: () => submitMemberInvite(),
+    feedback,
+  };
+  el("invitePersonBtn").disabled = true;
+  feedback.textContent = "Invio dell'invito...";
+}
+
+el("invitePersonBtn").addEventListener("click", submitMemberInvite);
+el("memberIdentifier").addEventListener("keydown", event => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    submitMemberInvite();
+  }
+});
+el("memberIdentifier").addEventListener("input", event => {
+  el("clearMemberIdentifier").classList.toggle("hidden", !event.target.value);
+});
+el("clearMemberIdentifier").addEventListener("click", () => {
+  el("memberIdentifier").value = "";
+  el("memberIdentifier").focus();
+  el("clearMemberIdentifier").classList.add("hidden");
+});
+participantSearch.addEventListener("input", () => {
+  el("clearParticipantSearch").classList.toggle("hidden", !participantSearch.value);
+  if (currentCommunity) renderParticipants(currentCommunity);
+});
+el("clearParticipantSearch").addEventListener("click", () => {
+  participantSearch.value = "";
+  participantSearch.dispatchEvent(new Event("input"));
+  participantSearch.focus();
+});
+el("participantIndexToggle").addEventListener("click", () => {
+  const expanded = el("participantIndexToggle").getAttribute("aria-expanded") === "true";
+  el("participantIndexToggle").setAttribute("aria-expanded", String(!expanded));
+  el("participantIndex").classList.toggle("collapsed", expanded);
+  el("participantIndexChevron").className = expanded ? "ph ph-caret-up" : "ph ph-caret-down";
+});
+el("participantOverflow").addEventListener("click", () => {
+  el("participantOverflowMenu").classList.toggle("hidden");
+});
+el("refreshParticipantsBtn").addEventListener("click", () => {
+  el("participantOverflowMenu").classList.add("hidden");
+  if (currentCommunityId) send({ t: "community_get", community: currentCommunityId });
+});
+el("openGroupSettingsBtn").addEventListener("click", () => {
+  el("participantOverflowMenu").classList.add("hidden");
+  if (currentCommunityId) {
+    openProfileModal();
+    switchSettingsSection("community");
+    send({ t: "community_get", community: currentCommunityId });
+  }
+});
 
 logoutBtn.onclick = () => {
   send({ t: "logout", token });
@@ -426,8 +1755,19 @@ messageInput.addEventListener("input", () => {
 
 sendBtn.onclick = () => {
   const text = messageInput.value.trim();
-  if (!text || !selectedContact) return;
-  send({ t: "dm", to: selectedContact, text });
+  if (!text) return;
+  if (currentCommunityId && currentChannelId) {
+    send({
+      t: "community_channel_send",
+      community: currentCommunityId,
+      channel: currentChannelId,
+      text,
+    });
+  } else if (selectedContact) {
+    send({ t: "dm", to: selectedContact, text });
+  } else {
+    return;
+  }
   messageInput.value = "";
   sendBtn.disabled = true;
 };
@@ -455,6 +1795,167 @@ function onMessage(event) {
       renderContacts();
       showMessenger();
       convStatus.textContent = "Connesso";
+      send({ t: "community_list" });
+      break;
+
+    case "settings_data":
+      populateSettingsSnapshot(m);
+      break;
+
+    case "account_saved":
+      if (m.account) populateSettingsSnapshot({ ...(settingsSnapshot || {}), account: m.account });
+      el("profileStatus").textContent = "Impostazioni account salvate.";
+      el("profileStatus").className = "settings-status success";
+      break;
+
+    case "SESSION_REVOKED":
+      if (m.current) expireSession("Questa sessione è stata disconnessa.");
+      break;
+
+    case "privacy_saved":
+      el("profileStatus").textContent = "Impostazioni privacy salvate.";
+      el("profileStatus").className = "settings-status success";
+      break;
+
+    case "password_changed":
+      el("profileStatus").textContent = "Password modificata.";
+      el("profileStatus").className = "settings-status success";
+      break;
+
+    case "two_factor_setup": {
+      const uri = m.otpauth_uri || "";
+      const code = prompt(`Configurazione 2FA\nSecret: ${m.secret}\nInserisci il codice a 6 cifre:`);
+      if (code) send({ t: "two_factor_enable", code });
+      break;
+    }
+
+    case "two_factor_saved":
+      el("profileStatus").textContent = m.enabled ? "Autenticazione a due fattori attivata." : "Autenticazione a due fattori disattivata.";
+      el("profileStatus").className = "settings-status success";
+      send({ t: "settings_get" });
+      break;
+
+    case "community_list":
+      communityListData = m.communities || [];
+      renderCommunityList(communityListData);
+      renderCommunityNav(m.communities || []);
+      renderPendingInvitations(m.invitations || []);
+      break;
+
+    case "community_data":
+      renderCommunitySnapshot(m.community);
+      if (m.community && (
+        pendingGroupSelection ||
+        (currentCommunityId && m.community.id === currentCommunityId)
+      )) {
+        currentCommunityId = m.community.id;
+        showCommunityInChat(m.community);
+      }
+      break;
+
+    case "community_history":
+      if (m.community === currentCommunityId && m.channel === currentChannelId) {
+        renderCommunityHistory(m.messages || []);
+      }
+      break;
+
+    case "community_message":
+      if (m.community === currentCommunityId && m.channel === currentChannelId) {
+        appendCommunityMessage(m.message);
+      }
+      break;
+
+    case "community_invite_received":
+      if (m.invite) {
+        const current = pendingInvitations.filter(item => item.community !== m.invite.group);
+        current.push({
+          community: m.invite.group,
+          name: m.invite.name,
+          inviter: m.invite.inviter,
+        });
+        renderPendingInvitations(current);
+      }
+      break;
+
+    case "community_invite_accepted":
+    case "community_invite_removed":
+      pendingInvitations = pendingInvitations.filter(item => item.community !== m.community);
+      renderPendingInvitations(pendingInvitations);
+      send({ t: "community_list" });
+      if (m.t === "community_invite_accepted") selectCommunity(m.community);
+      break;
+
+    case "community_invite_response":
+      if (currentCommunityId === m.community) send({ t: "community_get", community: m.community });
+      break;
+
+    case "member_roles_saved":
+      memberActionPending = null;
+      el("memberInviteFeedback").textContent = "Ruoli aggiornati.";
+      el("memberInviteFeedback").className = "member-feedback success";
+      send({ t: "community_get", community: m.community });
+      break;
+
+    case "member_removed":
+      memberActionPending = null;
+      el("memberInviteFeedback").textContent = "Membro rimosso dalla community.";
+      el("memberInviteFeedback").className = "member-feedback success";
+      send({ t: "community_get", community: m.community });
+      break;
+
+    case "member_invite_revoked":
+      memberActionPending = null;
+      el("memberInviteFeedback").textContent = "Invito revocato.";
+      el("memberInviteFeedback").className = "member-feedback success";
+      send({ t: "community_get", community: m.community });
+      break;
+
+    case "community_removed":
+      if (currentCommunityId === m.community) {
+        currentCommunityId = null;
+        currentCommunity = null;
+        currentChannelId = null;
+        convName.textContent = "Seleziona un contatto";
+        convStatus.textContent = "Seleziona una conversazione";
+        el("participantIndexTitle").textContent = "Participants - Select a group";
+        el("participantCount").textContent = "0";
+        el("participantDirectory").replaceChildren();
+        el("communityChannelBar").classList.add("hidden");
+        el("messages").replaceChildren(makePlaceholder("Seleziona un contatto per iniziare a chattare."));
+        send({ t: "community_list" });
+      }
+      break;
+
+    case "member_invited": {
+      const feedback = el("memberInviteFeedback");
+      memberActionPending = null;
+      el("invitePersonBtn").disabled = false;
+      el("memberIdentifier").value = "";
+      el("clearMemberIdentifier").classList.add("hidden");
+      selectedInviteRoles.clear();
+      el("suggestedRoles").querySelectorAll(".suggested-role").forEach(button => {
+        button.classList.remove("selected");
+        button.setAttribute("aria-pressed", "false");
+      });
+      feedback.innerHTML = `<i class="ph ph-check-circle" aria-hidden="true"></i> Invited ${escapeHtml(m.username || m.user)}.`;
+      feedback.className = "member-feedback success";
+      if (currentCommunityId === m.community) send({ t: "community_get", community: m.community });
+      break;
+    }
+
+    case "MEMBER_UPDATED":
+    case "MEMBER_REMOVED":
+    case "GROUP_UPDATED":
+    case "ROLE_UPDATED":
+    case "CHANNEL_UPDATED":
+      if (currentCommunityId && m.group === currentCommunityId) {
+        send({ t: "community_get", community: currentCommunityId });
+      }
+      break;
+
+    case "community_created":
+      selectCommunity(m.id);
+      send({ t: "community_list" });
       break;
 
     case "otp_required": {
@@ -474,8 +1975,12 @@ function onMessage(event) {
     }
 
     case "contact_added":
+      quickContactPending = false;
       contacts.push(m.contact);
       renderContacts();
+      el("quickContactInput").value = "";
+      el("quickContactFeedback").textContent = `Contatto aggiunto: ${m.contact?.name || m.contact?.username || ""}`;
+      el("quickContactFeedback").className = "success";
       break;
 
     case "history":
@@ -501,6 +2006,7 @@ function onMessage(event) {
         mediaCache.set(m.hash, `data:${m.mime};base64,${m.data}`);
         renderContacts();
         renderSelectedContact();
+        if (currentCommunity) renderParticipants(currentCommunity);
         if (!profileModal.classList.contains("hidden")) renderProfilePreview();
       }
       break;
@@ -519,6 +2025,34 @@ function onMessage(event) {
       break;
 
     case "err":
+      if (quickContactPending) {
+        quickContactPending = false;
+        el("quickContactFeedback").textContent = m.text || "Impossibile aggiungere il contatto.";
+        el("quickContactFeedback").className = "error";
+        break;
+      }
+      if (memberActionPending) {
+        const pending = memberActionPending;
+        memberActionPending = null;
+        const feedback = pending.feedback || el("memberInviteFeedback");
+        feedback.replaceChildren();
+        feedback.textContent = m.text || "Operazione non riuscita.";
+        feedback.className = "member-feedback error";
+        if (/connessione|riprova|timeout|server/i.test(feedback.textContent)) {
+          const retry = document.createElement("button");
+          retry.type = "button";
+          retry.className = "member-retry";
+          retry.textContent = "Riprova";
+          retry.addEventListener("click", pending.retry);
+          feedback.append(" ", retry);
+        }
+        el("invitePersonBtn").disabled = false;
+        if (pending.type === "remove") {
+          const row = participantDirectory.querySelector(".participant-row.removing");
+          row?.classList.remove("removing");
+        }
+        break;
+      }
       if (resumePending) {
         expireSession(m.text);
         break;
@@ -545,6 +2079,21 @@ function onMessage(event) {
     case "status":
       contacts = contacts.map(c => (c.id || c.username) === m.id ? { ...c, online: m.online } : c);
       renderContacts();
+      if (currentCommunity?.participants?.some(person => person.id === m.id)) {
+        currentCommunity.participants = currentCommunity.participants.map(person =>
+          person.id === m.id ? { ...person, online: m.online } : person
+        );
+        renderParticipants(currentCommunity);
+      }
+      break;
+
+    case "USER_UPDATED":
+      if (currentCommunity?.participants?.some(person => person.id === m.id) && m.profile) {
+        currentCommunity.participants = currentCommunity.participants.map(person =>
+          person.id === m.id ? { ...person, ...m.profile } : person
+        );
+        renderParticipants(currentCommunity);
+      }
       break;
 
     default:
@@ -591,7 +2140,12 @@ function appendMessage(from, text, kind, ts, silent) {
 function makePlaceholder(text) {
   const div = document.createElement("div");
   div.className = "msg-placeholder";
-  div.innerHTML = `<svg width="40" height="40" fill="none" stroke="#94a3b8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><polyline points="22 12 18 12 15 15 9 4 6 4"/><rect width="18" height="18" x="3" y="11"/></svg><p>${text}</p>`;
+  const icon = document.createElement("i");
+  icon.className = "ph ph-chat-circle-dots placeholder-icon";
+  icon.setAttribute("aria-hidden", "true");
+  const message = document.createElement("p");
+  message.textContent = text;
+  div.append(icon, message);
   return div;
 }
 
@@ -607,12 +2161,6 @@ function appendSystemMessage(text) {
 
 function scrollBottom() { messages.scrollTop = messages.scrollHeight; }
 
-// ---------- Helpers ----------
-function escapeHtml(s) {
-  const d = document.createElement("div");
-  d.textContent = s;
-  return d.innerHTML;
-}
-
 // Bootstrap
+applyLiveAppearance();
 connect();
