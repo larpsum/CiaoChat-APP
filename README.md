@@ -24,3 +24,7 @@ serviceAccountKey.json
 ```
 
 accanto a `CiaoChat.exe` oppure imposta la variabile d'ambiente `PYCHAT_SERVICE_ACCOUNT` con il percorso completo del file.
+
+## Personalizzazione del profilo
+
+Dal pulsante **Personalizza profilo** puoi caricare immagini profilo e banner nei formati JPG, PNG, WEBP, MP4 o GIF (massimo 1,7 MB ciascuno), scegliere il colore del nome e attivare un'animazione. Il server verifica sia l'estensione sia il contenuto del file.

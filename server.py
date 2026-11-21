@@ -73,6 +73,7 @@ HISTORY_LIMIT = 200
 MAX_TEXT = 2000
 MAX_LINE = 2_500_000                 # byte massimi per riga JSON (un vocale in base64 sta largamente dentro)
 MAX_IMAGE = 600_000                  # byte per avatar / banner
+MAX_PROFILE_MEDIA = 1_700_000         # keeps base64 uploads below MAX_LINE
 MAX_VOICE = 1_100_000                # byte per messaggio vocale (WAV)
 MEDIA_RETENTION_DAYS = 90            # i file non referenziati piu' vecchi di cosi' vengono cancellati all'avvio
 CALL_RING_SECONDS = 45
@@ -82,6 +83,7 @@ FAIL_MAX_PER_IP = 10
 USERNAME_RE = re.compile(r"^(?=.*[A-Za-z])[A-Za-z0-9]{3,20}$")   # alfanumerico, almeno una lettera
 PHONE_RE = re.compile(r"^\+[1-9]\d{7,14}$")                       # E.164
 HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+NAME_ANIMATIONS = {"none", "glow", "pulse", "rainbow"}
 
 lock = threading.RLock()
 online = {}          # chiave utente -> lista di Conn
@@ -295,7 +297,9 @@ def public_profile(key):
     if not isinstance(rec, dict):
         return None
     return {"id": key, "name": rec.get("username", key), "avatar": rec.get("avatar"),
-            "banner": rec.get("banner"), "online": key in online}
+            "avatar_type": rec.get("avatar_type"), "banner": rec.get("banner"),
+            "banner_type": rec.get("banner_type"), "name_color": rec.get("name_color", "#f1f5f9"),
+            "name_animation": rec.get("name_animation", "none"), "online": key in online}
 
 
 def contacts_of(key):
@@ -321,7 +325,10 @@ def finish_login(conn, key, rec, token):
         first = key not in online
         online.setdefault(key, []).append(conn)
     conn.send({"t": "ok", "id": key, "user": rec["username"], "phone": rec.get("phone"), "token": token,
-               "avatar": rec.get("avatar"), "banner": rec.get("banner"), "contacts": contacts_of(key)})
+               "avatar": rec.get("avatar"), "avatar_type": rec.get("avatar_type"),
+               "banner": rec.get("banner"), "banner_type": rec.get("banner_type"),
+               "name_color": rec.get("name_color", "#f1f5f9"),
+               "name_animation": rec.get("name_animation", "none"), "contacts": contacts_of(key)})
     log(f"{rec['username']} connesso da {conn.ip}")
     if first:
         broadcast({"t": "status", "id": key, "online": True})
@@ -521,13 +528,41 @@ def handle_profile(conn, m):
     conn.send({"t": "profile", "profile": prof})
 
 
+def handle_profile_customization(conn, m):
+    color = str(m.get("name_color", ""))
+    animation = str(m.get("name_animation", ""))
+    if not re.fullmatch(r"#[0-9a-fA-F]{6}", color) or animation not in NAME_ANIMATIONS:
+        return conn.send({"t": "err", "text": "Stile del nome non valido."})
+    fb_update(f"users/{conn.user}", {"name_color": color.lower(), "name_animation": animation})
+    broadcast({"t": "profile_update", "profile": public_profile(conn.user)})
+
+
 # ============================================================== file multimediali
 def media_path(h):
     return os.path.join(MEDIA_DIR, h + ".bin")
 
 
-def looks_like_image(data):
-    return data[:3] == b"\xff\xd8\xff" or data[:8] == b"\x89PNG\r\n\x1a\n"
+PROFILE_MEDIA_MIMES = {
+    "jpg": "image/jpeg",
+    "png": "image/png",
+    "webp": "image/webp",
+    "mp4": "video/mp4",
+    "gif": "image/gif",
+}
+
+
+def profile_media_mime(data):
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if len(data) >= 12 and data[4:8] == b"ftyp":
+        return "video/mp4"
+    return None
 
 
 def looks_like_wav(data):
@@ -577,7 +612,8 @@ def handle_media(conn, m):
                 data = f.read()
         except OSError:
             return
-        return conn.send({"t": "media", "hash": h, "data": base64.b64encode(data).decode("ascii")})
+        return conn.send({"t": "media", "hash": h, "mime": profile_media_mime(data),
+                          "data": base64.b64encode(data).decode("ascii")})
 
     kind = m.get("kind")
     if kind not in ("avatar", "banner", "voice"):
@@ -589,15 +625,19 @@ def handle_media(conn, m):
     if kind == "voice":
         valid = bool(data) and len(data) <= MAX_VOICE and looks_like_wav(data)
     else:
-        valid = bool(data) and len(data) <= MAX_IMAGE and looks_like_image(data)
+        extension = str(m.get("extension", "")).lower().removeprefix(".")
+        expected_mime = PROFILE_MEDIA_MIMES.get(extension)
+        valid = (
+            bool(data) and len(data) <= MAX_PROFILE_MEDIA and expected_mime is not None
+            and profile_media_mime(data) == expected_mime
+        )
     if not valid:
-        return conn.send({"t": "err", "text": "File rifiutato: formato o dimensione non validi."})
+        return conn.send({"t": "err", "text": "File rifiutato: usa JPG, PNG, WEBP, MP4 o GIF (max 1,7 MB)."})
     h = store_media(data)
     if kind in ("avatar", "banner"):
-        fb_update(f"users/{conn.user}", {kind: h})
-        conn.send({"t": "media_ok", "kind": kind, "hash": h})
-        broadcast({"t": "profile_update", "id": conn.user, "avatar": fb_get(f"users/{conn.user}/avatar"),
-                   "banner": fb_get(f"users/{conn.user}/banner")})
+        fb_update(f"users/{conn.user}", {kind: h, kind + "_type": extension})
+        conn.send({"t": "media_ok", "kind": kind, "hash": h, "extension": extension})
+        broadcast({"t": "profile_update", "profile": public_profile(conn.user)})
     else:
         conn.send({"t": "media_ok", "kind": kind, "hash": h})
 
@@ -606,8 +646,8 @@ def handle_clear_media(conn, m):
     kind = m.get("kind")
     if kind in ("avatar", "banner"):
         fb_delete(f"users/{conn.user}/{kind}")
-        broadcast({"t": "profile_update", "id": conn.user, "avatar": fb_get(f"users/{conn.user}/avatar"),
-                   "banner": fb_get(f"users/{conn.user}/banner")})
+        fb_delete(f"users/{conn.user}/{kind}_type")
+        broadcast({"t": "profile_update", "profile": public_profile(conn.user)})
 
 
 # ============================================================== chiamate (segnalazione + inoltro)
@@ -743,6 +783,8 @@ def dispatch(conn, m, t):
         handle_history(conn, m)
     elif t == "profile":
         handle_profile(conn, m)
+    elif t == "profile_customization":
+        handle_profile_customization(conn, m)
     elif t in ("media_put", "media_get"):
         handle_media(conn, m)
     elif t == "media_clear":
