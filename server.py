@@ -6,7 +6,7 @@ PyChat Ultimate Messenger - SERVER
   * Server TCP multithread, protocollo a righe JSON (una riga = un pacchetto, campo "t" = comando)
   * Persistenza su Firebase Realtime Database tramite firebase_admin:
         utenti, credenziali (solo hash PBKDF2 + salt), numeri di telefono, rubrica, messaggi
-  * Registrazione con verifica OTP via SMS REALE (Twilio Verify): il codice lo genera, lo invia e lo controlla Twilio
+  * Registrazione con OTP simulato: il codice viene mostrato al client, non viene inviato via SMS
   * Rubrica: aggiunta contatto per username esatto oppure per numero di telefono (E.164)
   * Messaggi diretti in tempo reale (testo e messaggi vocali), immagini profilo/banner
   * Chiamate audio e videochiamate 1-a-1: il server fa solo da segnalazione e inoltro
@@ -20,10 +20,6 @@ Avvio:
     python server.py
 Serve il file serviceAccountKey.json (Console Firebase > Impostazioni progetto > Account di servizio).
 
-SMS reali: imposta queste variabili d'ambiente prima di avviare il server (mai scriverle nel codice):
-    TWILIO_ACCOUNT_SID          (Console Twilio > Account info)
-    TWILIO_AUTH_TOKEN           (Console Twilio > Account info)
-    TWILIO_VERIFY_SERVICE_SID   (Console Twilio > Verify > Services > Create new, inizia con "VA")
 Opzionale: PYCHAT_SMS_PREFIXES="+39,+41" limita i paesi a cui inviare SMS (consigliato contro le frodi).
 Tutti i dati vengono scritti sotto il nodo /pychat del database, senza toccare altri dati del progetto.
 """
@@ -53,7 +49,7 @@ except ImportError:
 
 # ============================================================== CONFIGURAZIONE
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-SERVER_HOST = "0.0.0.0"
+SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 5555
 SERVICE_ACCOUNT_FILE = os.environ.get("PYCHAT_SERVICE_ACCOUNT", os.path.join(BASE_DIR, "serviceAccountKey.json"))
 FIREBASE_DB_URL = os.environ.get(
@@ -63,6 +59,7 @@ MEDIA_DIR = os.path.join(BASE_DIR, "media")
 
 # SMS in modalita simulata: nessun provider esterno, il codice viene mostrato al client.
 # Non usare in produzione.
+SMS_ALLOWED_PREFIXES = tuple(p.strip() for p in os.environ.get("PYCHAT_SMS_PREFIXES", "").split(",") if p.strip())
 SMS_MAX_PER_IP_HOUR = 5              # SMS richiedibili da uno stesso IP in un'ora
 SMS_MAX_PER_PHONE_10MIN = 3          # SMS richiedibili per uno stesso numero in 10 minuti
 OTP_TTL_SECONDS = 600                # come la validita' predefinita dei codici Twilio Verify (10 minuti)
@@ -120,7 +117,7 @@ class SimulatedGateway:
     def start(self, phone):
         code = f"{secrets.randbelow(10 ** 6):06d}"
         self.codes[phone] = code
-        log(f"[SMS simulato] a {phone}: codice {code}")
+        log("[SMS simulato] codice di verifica generato.")
         return code
 
     def check(self, phone, code):
@@ -346,7 +343,8 @@ def issue_token(key):
 
 def handle_register(conn, m):
     username = str(m.get("user", "")).strip()
-    phone = normalize_phone(m.get("phone"))
+    raw_phone = str(m.get("phone") or "").strip()
+    phone = normalize_phone(raw_phone) if raw_phone else None
     password = str(m.get("pw", ""))
     otp = str(m.get("otp", "")).strip()
 
@@ -357,17 +355,17 @@ def handle_register(conn, m):
         return err("Troppi tentativi. Riprova tra qualche minuto.")
     if not USERNAME_RE.match(username):
         return err("Username non valido: 3-20 caratteri alfanumerici, con almeno una lettera.")
-    if phone is None:
+    if raw_phone and phone is None:
         return err("Numero di telefono non valido. Usa il formato internazionale, es. +393331234567.")
     if not 8 <= len(password) <= 128:
         return err("La password deve avere almeno 8 caratteri.")
     key = username.lower()
     if fb_get(f"usernames/{key}") is not None:
         return err("Questo username e' gia' in uso.")
-    if fb_get(f"phones/{phone_key(phone)}") is not None:
+    if phone and fb_get(f"phones/{phone_key(phone)}") is not None:
         return err("Questo numero di telefono e' gia' registrato.")
 
-    if not otp:                                    # fase 1: invio dell'SMS con il codice
+    if phone and not otp:                          # fase 1: invio dell'SMS con il codice
         if SMS_ALLOWED_PREFIXES and not phone.startswith(SMS_ALLOWED_PREFIXES):
             return err("Per ora sono supportati solo numeri con prefisso: " + ", ".join(SMS_ALLOWED_PREFIXES) + ".")
         if not sms_send_allowed(conn.ip, phone):
@@ -380,37 +378,41 @@ def handle_register(conn, m):
         conn.send({"t": "otp_required", "phone": phone, "ttl": OTP_TTL_SECONDS, "sim_code": revealed})
         return
 
-    pend = conn.pending                            # fase 2: verifica del codice e creazione account
-    if not pend or pend["user"] != key or pend["phone"] != phone:
-        return err("Richiedi prima un nuovo codice di verifica.")
-    if time.time() > pend["exp"]:
-        conn.pending = None
-        return err("Il codice e' scaduto. Richiedine uno nuovo.")
-    if pend["tries"] >= OTP_MAX_TRIES:
-        conn.pending = None
-        return err("Troppi tentativi errati. Richiedi un nuovo codice.")
-    try:
-        approved = gateway.check(phone, otp)       # il controllo lo fa Twilio
-    except SmsError as e:
-        if e.fatal:
+    if phone:
+        pend = conn.pending                        # fase 2: verifica del codice e creazione account
+        if not pend or pend["user"] != key or pend["phone"] != phone:
+            return err("Richiedi prima un nuovo codice di verifica.")
+        if time.time() > pend["exp"]:
             conn.pending = None
-        return err(str(e))
-    if not approved:
-        pend["tries"] += 1
-        record_failure(conn.ip)
-        return err("Codice non corretto.")
+            return err("Il codice e' scaduto. Richiedine uno nuovo.")
+        if pend["tries"] >= OTP_MAX_TRIES:
+            conn.pending = None
+            return err("Troppi tentativi errati. Richiedi un nuovo codice.")
+        try:
+            approved = gateway.check(phone, otp)
+        except SmsError as e:
+            if e.fatal:
+                conn.pending = None
+            return err(str(e))
+        if not approved:
+            pend["tries"] += 1
+            record_failure(conn.ip)
+            return err("Codice non corretto.")
+    elif otp:
+        return err("Rimuovi il codice di verifica oppure inserisci un numero di telefono.")
 
-    if not fb_claim(f"usernames/{key}", key):      # prenotazione atomica di username e telefono
+    if not fb_claim(f"usernames/{key}", key):
         return err("Questo username e' gia' in uso.")
-    if not fb_claim(f"phones/{phone_key(phone)}", key):
+    if phone and not fb_claim(f"phones/{phone_key(phone)}", key):
         fb_delete(f"usernames/{key}")
         return err("Questo numero di telefono e' gia' registrato.")
     salt = secrets.token_hex(16)
-    rec = {"username": username, "phone": phone, "salt": salt, "hash": hash_password(password, salt),
-           "created": now()}
+    rec = {"username": username, "salt": salt, "hash": hash_password(password, salt), "created": now()}
+    if phone:
+        rec["phone"] = phone
     fb_set(f"users/{key}", rec)
     conn.pending = None
-    log(f"Nuovo utente registrato: {username} ({phone})")
+    log(f"Nuovo utente registrato: {username}")
     finish_login(conn, key, rec, issue_token(key))
 
 

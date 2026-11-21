@@ -26,7 +26,12 @@ async def ws_handler(request):
     ws = web.WebSocketResponse()
     await ws.prepare(request)
 
-    reader, writer = await asyncio.open_connection(TCP_HOST, TCP_PORT)
+    try:
+        reader, writer = await asyncio.open_connection(TCP_HOST, TCP_PORT)
+    except OSError:
+        await ws.send_json({"t": "err", "text": "Server chat non disponibile. Verifica le credenziali Firebase e riprova."})
+        await ws.close()
+        return ws
 
     async def tcp_to_ws():
         try:
@@ -76,7 +81,7 @@ def main():
     app.router.add_get("/", index)
     app.router.add_get("/static/{name}", static_file)
     app.router.add_get("/ws", ws_handler)
-    web.run_app(app, host="0.0.0.0", port=8080)
+    web.run_app(app, host="127.0.0.1", port=8080)
 
 
 if __name__ == "__main__":

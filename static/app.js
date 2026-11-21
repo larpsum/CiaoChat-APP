@@ -16,6 +16,7 @@ let me = null;
 let selectedContact = null;
 let contacts = [];
 let sendQueue = [];
+let registrationAwaitingOtp = false;
 const mediaCache = new Map();
 const mediaRequests = new Set();
 const allowedExtensions = new Set(["jpg", "png", "webp", "mp4", "gif"]);
@@ -25,6 +26,7 @@ function connect() {
   ws = new WebSocket(WS_URL);
   ws.onopen = () => {
     console.log("[ws] connected");
+    clearAuthMsg();
     // flush any messages queued while connecting
     const q = sendQueue.splice(0, sendQueue.length);
     q.forEach(obj => ws.send(JSON.stringify(obj)));
@@ -32,6 +34,10 @@ function connect() {
   ws.onmessage = onMessage;
   ws.onclose = () => {
     console.log("[ws] closed");
+    sendQueue = [];
+    if (authShell.style.display !== "none") {
+      setAuthMsg("Server non disponibile. Riprova tra qualche secondo.");
+    }
     setTimeout(connect, 2000);
   };
   ws.onerror = console.error;
@@ -41,9 +47,15 @@ function send(obj) {
   const data = JSON.stringify(obj);
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(data);
-  } else {
+    return true;
+  } else if (ws && ws.readyState === WebSocket.CONNECTING) {
     sendQueue.push(obj);
+    return true;
   }
+  if (authShell.style.display !== "none") {
+    setAuthMsg("Connessione al server non disponibile. Riprova tra qualche secondo.");
+  }
+  return false;
 }
 
 // ---------- UI helpers ----------
@@ -88,7 +100,7 @@ loginForm.addEventListener("submit", e => {
   btn.disabled = true;
   btn.textContent = "Accedi...";
   const fd = new FormData(loginForm);
-  send({ t: "login", username: fd.get("username"), password: fd.get("password") });
+  send({ t: "login", user: fd.get("username"), pw: fd.get("password") });
   // restore button after a short delay; server "ok" response switches views anyway
   setTimeout(() => {
     btn.disabled = false;
@@ -104,9 +116,13 @@ registerForm.addEventListener("submit", e => {
   btn.disabled = true;
   btn.textContent = "Creazione...";
   const fd = new FormData(registerForm);
-  const msg = { t: "register", username: fd.get("username"), password: fd.get("password") };
-  const phone = fd.get("phone");
-  if (phone) msg.phone = phone;
+  const msg = {
+    t: "register",
+    user: fd.get("username"),
+    pw: fd.get("password"),
+    phone: fd.get("phone"),
+  };
+  if (registrationAwaitingOtp && msg.phone) msg.otp = fd.get("otp");
   send(msg);
   setTimeout(() => {
     btn.disabled = false;
@@ -384,6 +400,11 @@ function onMessage(event) {
 
   switch (m.t) {
     case "ok":
+      registrationAwaitingOtp = false;
+      el("otpField").classList.add("hidden");
+      el("registerOtp").required = false;
+      el("registerOtp").value = "";
+      el("registerSubmit").textContent = "Crea account";
       token = m.token;
       me = {
         id: m.id, username: m.user, phone: m.phone, avatar: m.avatar,
@@ -395,6 +416,22 @@ function onMessage(event) {
       showMessenger();
       convStatus.textContent = "Connesso";
       break;
+
+    case "otp_required": {
+      registrationAwaitingOtp = true;
+      const otpField = el("otpField");
+      otpField.classList.remove("hidden");
+      const otpInput = el("registerOtp");
+      otpInput.required = true;
+      otpInput.focus();
+      const codeMessage = m.sim_code
+        ? `Codice di verifica simulato: ${m.sim_code}.`
+        : "Ti abbiamo inviato un codice di verifica via SMS.";
+      setAuthMsg(`${codeMessage} Inseriscilo per completare la registrazione.`, "success");
+      const registerButton = el("registerSubmit");
+      registerButton.textContent = "Verifica e crea account";
+      break;
+    }
 
     case "contact_added":
       contacts.push(m.contact);

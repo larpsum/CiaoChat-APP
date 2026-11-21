@@ -49,7 +49,11 @@
           <label>Numero di telefono (opzionale)</label>
           <input type="tel" name="phone" placeholder="+39 333 1234567" autocomplete="tel">
         </div>
-        <button class="btn btn-primary" type="submit">Crea account</button>
+        <div class="field hidden" id="otpField">
+          <label for="registerOtp">Codice di verifica</label>
+          <input type="text" id="registerOtp" name="otp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}">
+        </div>
+        <button class="btn btn-primary" id="registerSubmit" type="submit">Crea account</button>
       </form>
 
       <div id="authMsg" class="msg"></div>

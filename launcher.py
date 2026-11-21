@@ -21,13 +21,22 @@ def open_browser():
     webbrowser.open("http://127.0.0.1:8080")
 
 
+def runtime_data_dir():
+    if not getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(__file__))
+    if os.name == "nt":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if not local_app_data:
+            local_app_data = os.path.join(os.path.expanduser("~"), "AppData", "Local")
+        data_dir = os.path.join(local_app_data, "CiaoChat")
+        os.makedirs(data_dir, exist_ok=True)
+        return data_dir
+    return os.path.dirname(os.path.abspath(sys.executable))
+
+
 def run_chat_server():
     try:
-        runtime_dir = (
-            os.path.dirname(sys.executable)
-            if getattr(sys, "frozen", False)
-            else os.path.dirname(os.path.abspath(__file__))
-        )
+        runtime_dir = runtime_data_dir()
         server.BASE_DIR = runtime_dir
         server.MEDIA_DIR = os.path.join(runtime_dir, "media")
         server.SERVICE_ACCOUNT_FILE = os.environ.get(

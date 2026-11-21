@@ -160,6 +160,7 @@ input::placeholder { color: var(--text-muted); }
   min-height: 1.2em;
 }
 .msg.error { color: var(--danger); }
+.msg.success { color: var(--success); }
 
 /* ---------- Messenger ---------- */
 .messenger {
