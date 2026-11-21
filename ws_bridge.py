@@ -20,6 +20,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 TCP_HOST = "127.0.0.1"
 TCP_PORT = 5555
+TCP_LINE_LIMIT = 2_500_000
 
 
 async def ws_handler(request):
@@ -27,7 +28,7 @@ async def ws_handler(request):
     await ws.prepare(request)
 
     try:
-        reader, writer = await asyncio.open_connection(TCP_HOST, TCP_PORT)
+        reader, writer = await asyncio.open_connection(TCP_HOST, TCP_PORT, limit=TCP_LINE_LIMIT)
     except OSError:
         await ws.send_json({"t": "err", "text": "Server chat non disponibile. Verifica le credenziali Firebase e riprova."})
         await ws.close()

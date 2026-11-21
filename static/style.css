@@ -363,17 +363,21 @@ input::placeholder { color: var(--text-muted); }
 
 .name-glow { animation: nameGlow 1.8s ease-in-out infinite alternate; }
 .name-pulse { animation: namePulse 1.4s ease-in-out infinite; }
-.name-rainbow {
-  animation: nameRainbow 3s linear infinite;
-  background-image: linear-gradient(90deg, #ff617d, #ffcf5c, #61e6a5, #59baff, #bd83ff, #ff617d);
-  background-size: 300% 100%;
-  background-clip: text;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-}
+.name-rainbow { animation: nameShimmer 2.4s ease-in-out infinite; }
+.name-bounce { animation: nameBounce 1.2s ease-in-out infinite; }
+.name-shake { animation: nameShake 0.7s ease-in-out infinite; }
+.name-wave { animation: nameWave 1.8s ease-in-out infinite; }
+.name-flicker { animation: nameFlicker 2.2s linear infinite; }
 @keyframes nameGlow { from { text-shadow: 0 0 2px currentColor; } to { text-shadow: 0 0 10px currentColor; } }
 @keyframes namePulse { 50% { opacity: 0.55; } }
-@keyframes nameRainbow { to { background-position: 300% center; } }
+@keyframes nameShimmer {
+  0%, 100% { filter: brightness(1); text-shadow: 0 0 1px currentColor; }
+  50% { filter: brightness(1.4); text-shadow: 0 0 9px currentColor; }
+}
+@keyframes nameBounce { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
+@keyframes nameShake { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-1px); } 75% { transform: translateX(1px); } }
+@keyframes nameWave { 0%, 100% { transform: rotate(0); } 25% { transform: rotate(-2deg); } 75% { transform: rotate(2deg); } }
+@keyframes nameFlicker { 0%, 18%, 22%, 62%, 64%, 100% { opacity: 1; } 20%, 63% { opacity: 0.45; } }
 
 /* Messages */
 .messages {

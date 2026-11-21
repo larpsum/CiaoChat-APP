@@ -13,10 +13,12 @@ const registerPanel = el("registerForm");
 let ws = null;
 let token = null;
 let me = null;
+let resumePending = false;
 let selectedContact = null;
 let contacts = [];
 let sendQueue = [];
 let registrationAwaitingOtp = false;
+let pendingMediaKind = null;
 const mediaCache = new Map();
 const mediaRequests = new Set();
 const allowedExtensions = new Set(["jpg", "png", "webp", "mp4", "gif"]);
@@ -27,6 +29,10 @@ function connect() {
   ws.onopen = () => {
     console.log("[ws] connected");
     clearAuthMsg();
+    if (token && me?.id) {
+      resumePending = true;
+      ws.send(JSON.stringify({ t: "resume", user: me.id, token }));
+    }
     // flush any messages queued while connecting
     const q = sendQueue.splice(0, sendQueue.length);
     q.forEach(obj => ws.send(JSON.stringify(obj)));
@@ -37,6 +43,8 @@ function connect() {
     sendQueue = [];
     if (authShell.style.display !== "none") {
       setAuthMsg("Server non disponibile. Riprova tra qualche secondo.");
+    } else if (me) {
+      convStatus.textContent = "Connessione persa, riconnessione...";
     }
     setTimeout(connect, 2000);
   };
@@ -52,7 +60,10 @@ function send(obj) {
     sendQueue.push(obj);
     return true;
   }
-  if (authShell.style.display !== "none") {
+  if (!profileModal.classList.contains("hidden")) {
+    profileStatus.textContent = "Connessione al server non disponibile. Riprova tra qualche secondo.";
+    profileStatus.className = "error";
+  } else if (authShell.style.display !== "none") {
     setAuthMsg("Connessione al server non disponibile. Riprova tra qualche secondo.");
   }
   return false;
@@ -222,11 +233,17 @@ function renderSelectedContact() {
 function styleName(node, profile) {
   node.style.color = /^#[0-9a-f]{6}$/i.test(profile?.name_color || "")
     ? profile.name_color : "";
-  node.classList.remove("name-glow", "name-pulse", "name-rainbow");
+  node.classList.remove(
+    "name-glow", "name-pulse", "name-rainbow", "name-bounce", "name-shake", "name-wave", "name-flicker",
+  );
   const animationClass = {
     glow: "name-glow",
     pulse: "name-pulse",
     rainbow: "name-rainbow",
+    bounce: "name-bounce",
+    shake: "name-shake",
+    wave: "name-wave",
+    flicker: "name-flicker",
   }[profile?.name_animation];
   if (animationClass) node.classList.add(animationClass);
 }
@@ -240,20 +257,19 @@ function makeAvatar(profile, className) {
   return avatar;
 }
 
-function mediaElement(hash, className) {
-  if (!hash) return null;
-  const src = mediaCache.get(hash);
-  if (!src) {
-    if (!mediaRequests.has(hash)) {
+function mediaElement(hash, className, previewSrc = null) {
+  const mediaSrc = previewSrc || mediaCache.get(hash);
+  if (!mediaSrc) {
+    if (hash && !mediaRequests.has(hash)) {
       mediaRequests.add(hash);
       send({ t: "media_get", hash });
     }
     return null;
   }
-  const video = src.startsWith("data:video/");
+  const video = mediaSrc.startsWith("data:video/");
   const media = document.createElement(video ? "video" : "img");
   media.className = className;
-  media.src = src;
+  media.src = mediaSrc;
   if (video) {
     media.autoplay = true;
     media.loop = true;
@@ -271,10 +287,10 @@ function renderProfilePreview() {
   styleName(profilePreviewName, me);
   profilePreviewAvatar.replaceChildren();
   profilePreviewAvatar.textContent = avatarInitial(me?.username);
-  const avatar = mediaElement(me?.avatar, "avatar-media");
+  const avatar = mediaElement(me?.avatar, "avatar-media", me?.avatar_preview);
   if (avatar) profilePreviewAvatar.replaceChildren(avatar);
   profilePreviewBanner.replaceChildren();
-  const banner = mediaElement(me?.banner, "preview-banner-media");
+  const banner = mediaElement(me?.banner, "preview-banner-media", me?.banner_preview);
   if (banner) profilePreviewBanner.appendChild(banner);
   nameColor.value = me?.name_color || "#f1f5f9";
   nameAnimation.value = me?.name_animation || "none";
@@ -304,7 +320,25 @@ function closeProfileModal() {
   profileModal.classList.add("hidden");
 }
 
+function expireSession(message) {
+  token = null;
+  me = null;
+  selectedContact = null;
+  contacts = [];
+  pendingMediaKind = null;
+  resumePending = false;
+  closeProfileModal();
+  renderContacts();
+  showAuth();
+  setAuthMsg(message || "Sessione scaduta: accedi di nuovo.");
+}
+
 function uploadProfileMedia(kind, file) {
+  if (pendingMediaKind) {
+    profileStatus.textContent = "Attendi il completamento del caricamento corrente.";
+    profileStatus.className = "error";
+    return;
+  }
   const extension = /\.([^.]+)$/.exec(file.name)?.[1].toLowerCase() || "";
   if (!allowedExtensions.has(extension)) {
     profileStatus.textContent = "Formato non consentito. Usa JPG, PNG, WEBP, MP4 o GIF.";
@@ -322,7 +356,11 @@ function uploadProfileMedia(kind, file) {
     profileStatus.className = "error";
   };
   reader.onload = () => {
-    const base64 = String(reader.result).split(",", 2)[1];
+    const dataUrl = String(reader.result);
+    const base64 = dataUrl.split(",", 2)[1];
+    me = { ...me, [`${kind}_preview`]: dataUrl };
+    pendingMediaKind = kind;
+    renderProfilePreview();
     send({ t: "media_put", kind, extension, data: base64 });
     profileStatus.textContent = "Caricamento...";
     profileStatus.className = "";
@@ -372,12 +410,13 @@ newChatBtn.onclick = () => {
 };
 
 logoutBtn.onclick = () => {
-  send({ t: "logout" });
+  send({ t: "logout", token });
   closeProfileModal();
   token = null;
   me = null;
   selectedContact = null;
   contacts = [];
+  resumePending = false;
   showAuth();
 };
 
@@ -400,6 +439,7 @@ function onMessage(event) {
 
   switch (m.t) {
     case "ok":
+      resumePending = false;
       registrationAwaitingOtp = false;
       el("otpField").classList.add("hidden");
       el("registerOtp").required = false;
@@ -467,7 +507,11 @@ function onMessage(event) {
 
     case "media_ok":
       if (me && (m.kind === "avatar" || m.kind === "banner")) {
+        const preview = me[`${m.kind}_preview`];
+        if (preview) mediaCache.set(m.hash, preview);
         me = { ...me, [m.kind]: m.hash, [`${m.kind}_type`]: m.extension };
+        delete me[`${m.kind}_preview`];
+        pendingMediaKind = null;
         profileStatus.textContent = "Caricamento completato.";
         profileStatus.className = "success";
         renderProfilePreview();
@@ -475,7 +519,20 @@ function onMessage(event) {
       break;
 
     case "err":
+      if (resumePending) {
+        expireSession(m.text);
+        break;
+      }
+      if (m.text === "Effettua prima l'accesso.") {
+        expireSession("Sessione scaduta: accedi di nuovo.");
+        break;
+      }
       if (!profileModal.classList.contains("hidden")) {
+        if (pendingMediaKind && me) {
+          delete me[`${pendingMediaKind}_preview`];
+          pendingMediaKind = null;
+          renderProfilePreview();
+        }
         profileStatus.textContent = m.text || "Errore";
         profileStatus.className = "error";
       } else if (selectedContact) {
