@@ -17,7 +17,6 @@ let resumePending = false;
 let selectedContact = null;
 let contacts = [];
 let sendQueue = [];
-let registrationAwaitingOtp = false;
 let pendingMediaKind = null;
 const mediaCache = new Map();
 const mediaRequests = new Set();
@@ -214,9 +213,8 @@ registerForm.addEventListener("submit", e => {
     t: "register",
     user: fd.get("username"),
     pw: fd.get("password"),
-    phone: fd.get("phone"),
+    email: fd.get("email"),
   };
-  if (registrationAwaitingOtp && msg.phone) msg.otp = fd.get("otp");
   send(msg);
   setTimeout(() => {
     btn.disabled = false;
@@ -1326,7 +1324,6 @@ function populateSettingsSnapshot(snapshot) {
   el("accountUsername").value = account.username || "";
   el("accountDisplayName").value = account.display_name || account.username || "";
   el("accountEmail").value = account.email || "";
-  el("accountPhone").value = account.phone || "";
   el("accountBio").value = account.bio || "";
   el("accountStatus").value = account.status || "";
   el("accountStatusExpiration").value = "0";
@@ -2395,14 +2392,9 @@ function onMessage(event) {
   switch (m.t) {
     case "ok":
       resumePending = false;
-      registrationAwaitingOtp = false;
-      el("otpField").classList.add("hidden");
-      el("registerOtp").required = false;
-      el("registerOtp").value = "";
-      el("registerSubmit").textContent = "Crea account";
       token = m.token;
       me = {
-        id: m.id, username: m.user, phone: m.phone, avatar: m.avatar,
+        id: m.id, username: m.user, email: m.email, avatar: m.avatar,
         avatar_type: m.avatar_type, banner: m.banner, banner_type: m.banner_type,
         name_color: m.name_color, name_animation: m.name_animation,
       };
@@ -2651,21 +2643,6 @@ function onMessage(event) {
       send({ t: "community_list" });
       break;
 
-    case "otp_required": {
-      registrationAwaitingOtp = true;
-      const otpField = el("otpField");
-      otpField.classList.remove("hidden");
-      const otpInput = el("registerOtp");
-      otpInput.required = true;
-      otpInput.focus();
-      const codeMessage = m.sim_code
-        ? `Codice di verifica simulato: ${m.sim_code}.`
-        : "Ti abbiamo inviato un codice di verifica via SMS.";
-      setAuthMsg(`${codeMessage} Inseriscilo per completare la registrazione.`, "success");
-      const registerButton = el("registerSubmit");
-      registerButton.textContent = "Verifica e crea account";
-      break;
-    }
 
     case "contact_added":
       if (quickContactPending) {

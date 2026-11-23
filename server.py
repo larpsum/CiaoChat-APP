@@ -438,10 +438,8 @@ def issue_token(key, conn=None):
 
 def handle_register(conn, m):
     username = str(m.get("user", "")).strip()
-    raw_phone = str(m.get("phone") or "").strip()
-    phone = normalize_phone(raw_phone) if raw_phone else None
+    email = str(m.get("email") or "").strip().lower()
     password = str(m.get("pw", ""))
-    otp = str(m.get("otp", "")).strip()
 
     def err(text):
         conn.send({"t": "err", "text": text})
@@ -450,61 +448,24 @@ def handle_register(conn, m):
         return err("Troppi tentativi. Riprova tra qualche minuto.")
     if not USERNAME_RE.match(username):
         return err("Username non valido: 3-20 caratteri alfanumerici, con almeno una lettera.")
-    if raw_phone and phone is None:
-        return err("Numero di telefono non valido. Usa il formato internazionale, es. +393331234567.")
+    if len(email) > 254 or not EMAIL_RE.fullmatch(email):
+        return err("Indirizzo email non valido.")
     if not 8 <= len(password) <= 128:
         return err("La password deve avere almeno 8 caratteri.")
     key = username.lower()
     if fb_get(f"usernames/{key}") is not None:
         return err("Questo username e' gia' in uso.")
-    if phone and fb_get(f"phones/{phone_key(phone)}") is not None:
-        return err("Questo numero di telefono e' gia' registrato.")
-
-    if phone and not otp:                          # fase 1: invio dell'SMS con il codice
-        if SMS_ALLOWED_PREFIXES and not phone.startswith(SMS_ALLOWED_PREFIXES):
-            return err("Per ora sono supportati solo numeri con prefisso: " + ", ".join(SMS_ALLOWED_PREFIXES) + ".")
-        if not sms_send_allowed(conn.ip, phone):
-            return err("Hai richiesto troppi codici. Riprova tra qualche minuto.")
-        try:
-            revealed = gateway.start(phone)        # None con SMS reali: il codice non passa dal server
-        except SmsError as e:
-            return err(str(e))
-        conn.pending = {"user": key, "phone": phone, "exp": time.time() + OTP_TTL_SECONDS, "tries": 0}
-        conn.send({"t": "otp_required", "phone": phone, "ttl": OTP_TTL_SECONDS, "sim_code": revealed})
-        return
-
-    if phone:
-        pend = conn.pending                        # fase 2: verifica del codice e creazione account
-        if not pend or pend["user"] != key or pend["phone"] != phone:
-            return err("Richiedi prima un nuovo codice di verifica.")
-        if time.time() > pend["exp"]:
-            conn.pending = None
-            return err("Il codice e' scaduto. Richiedine uno nuovo.")
-        if pend["tries"] >= OTP_MAX_TRIES:
-            conn.pending = None
-            return err("Troppi tentativi errati. Richiedi un nuovo codice.")
-        try:
-            approved = gateway.check(phone, otp)
-        except SmsError as e:
-            if e.fatal:
-                conn.pending = None
-            return err(str(e))
-        if not approved:
-            pend["tries"] += 1
-            record_failure(conn.ip)
-            return err("Codice non corretto.")
-    elif otp:
-        return err("Rimuovi il codice di verifica oppure inserisci un numero di telefono.")
+    email_key = hashlib.sha256(email.encode("utf-8")).hexdigest()
+    if fb_get(f"email_index/{email_key}") is not None:
+        return err("Questo indirizzo email e' gia' registrato.")
 
     if not fb_claim(f"usernames/{key}", key):
         return err("Questo username e' gia' in uso.")
-    if phone and not fb_claim(f"phones/{phone_key(phone)}", key):
+    if not fb_claim(f"email_index/{email_key}", key):
         fb_delete(f"usernames/{key}")
-        return err("Questo numero di telefono e' gia' registrato.")
+        return err("Questo indirizzo email e' gia' registrato.")
     salt = secrets.token_hex(16)
-    rec = {"username": username, "salt": salt, "hash": hash_password(password, salt), "created": now()}
-    if phone:
-        rec["phone"] = phone
+    rec = {"username": username, "email": email, "salt": salt, "hash": hash_password(password, salt), "created": now()}
     fb_set(f"users/{key}", rec)
     conn.pending = None
     log(f"Nuovo utente registrato: {username}")

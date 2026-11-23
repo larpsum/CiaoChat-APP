@@ -29,7 +29,7 @@ accanto a `server.py` durante l'esecuzione dal sorgente. Nell'installazione Wind
 
 Dal pulsante **Personalizza profilo** puoi caricare immagini profilo e banner nei formati JPG, PNG, WEBP, MP4 o GIF (massimo 1,7 MB ciascuno), scegliere il colore del nome e attivare un'animazione. Il server verifica sia l'estensione sia il contenuto del file.
 
-La registrazione non richiede un numero di telefono. Se ne inserisci uno, viene richiesto il codice di verifica simulato mostrato nell'interfaccia.
+La registrazione richiede un indirizzo email e una password.
 
 ## Gruppi, partecipanti e tema
 

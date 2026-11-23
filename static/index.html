@@ -48,12 +48,8 @@
           <input type="password" name="password" placeholder="••••••••" autocomplete="new-password" required>
         </div>
         <div class="field">
-          <label>Numero di telefono (opzionale)</label>
-          <input type="tel" name="phone" placeholder="+39 333 1234567" autocomplete="tel">
-        </div>
-        <div class="field hidden" id="otpField">
-          <label for="registerOtp">Codice di verifica</label>
-          <input type="text" id="registerOtp" name="otp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}">
+          <label>Email</label>
+          <input type="email" name="email" placeholder="nome@example.com" autocomplete="email" required>
         </div>
         <button class="btn btn-primary" id="registerSubmit" type="submit">Crea account</button>
       </form>
@@ -86,7 +82,7 @@
 
       <div class="list-title"><i class="ph ph-user" aria-hidden="true"></i> Contatti</div>
       <div class="inline-contact-add">
-        <input id="quickContactInput" type="text" placeholder="Username o telefono" aria-label="Username o telefono">
+        <input id="quickContactInput" type="text" placeholder="Username o email" aria-label="Username o email">
         <button class="icon-btn" id="quickContactAddBtn" type="button" aria-label="Aggiungi contatto"><i class="ph ph-user-plus" aria-hidden="true"></i></button>
         <div id="quickContactFeedback" role="status"></div>
       </div>
@@ -230,7 +226,6 @@
             <div class="setting-field"><label>Nome visualizzato</label><input id="accountDisplayName" type="text" maxlength="32"></div>
             <div class="setting-field"><label>Username</label><input id="accountUsername" type="text" maxlength="20"></div>
             <div class="setting-field"><label>Email</label><input id="accountEmail" type="email"></div>
-            <div class="setting-field"><label>Telefono</label><input id="accountPhone" type="tel" disabled></div>
             <div class="setting-field full"><label>Biografia</label><textarea id="accountBio" maxlength="160"></textarea></div>
             <div class="setting-field full"><label>Stato personalizzato</label><input id="accountStatus" type="text" maxlength="80"></div>
             <div class="setting-field"><label>Scadenza stato</label><select id="accountStatusExpiration"><option value="0">Mai</option><option value="3600">1 ora</option><option value="14400">4 ore</option><option value="86400">Oggi</option><option value="604800">7 giorni</option></select></div>
