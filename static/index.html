@@ -12,10 +12,41 @@
 <link rel="stylesheet" href="static/style.css">
 </head>
 <body>
-<div id="app">
+<div class="brand-intro" id="brandIntro" aria-hidden="true">
+  <svg class="brand-morph" viewBox="0 0 760 180" role="presentation">
+    <text class="brand-word brand-ciao" x="275" y="119" text-anchor="middle">Ciao</text>
+    <text class="brand-word brand-chat" x="490" y="119" text-anchor="middle">Chat</text>
+    <g transform="translate(314 23)">
+      <g class="brand-mark">
+        <path d="M75 26C62 14 41 13 27 25 13 37 10 57 20 73c10 16 31 22 49 14 9-4 15-12 18-21M105 26c13-12 34-13 48-1 14 12 17 32 7 48-10 16-31 22-49 14-9-4-15-12-18-21" fill="none" stroke="currentColor" stroke-width="15" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="m92 64-16 34 31-19" fill="currentColor"/>
+      </g>
+    </g>
+  </svg>
+</div>
+<div id="app" aria-hidden="true" inert>
   <!-- Auth shell -->
   <div class="shell" id="authShell">
-    <div class="auth-card">
+    <canvas class="farm-scene" id="farmScene" aria-hidden="true"></canvas>
+    <canvas class="login-scene" id="loginScene" aria-hidden="true"></canvas>
+    <canvas class="glass-pane" id="glassPane" aria-hidden="true"></canvas>
+    <canvas class="ascii-field" id="asciiField" aria-hidden="true"></canvas>
+    <a class="login-brand-corner" href="/" aria-label="CiaoChat">
+      <svg viewBox="0 0 64 48" aria-hidden="true">
+        <path d="M28 8C22 3 12 4 7 10 2 17 4 26 10 31c6 5 15 5 21 0M36 8c6-5 16-4 21 2 5 7 3 16-3 21-6 5-15 5-21 0" fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round"/>
+        <path d="m34 28-7 15 15-9" fill="currentColor"/>
+      </svg>
+      <span>CIAOCHAT</span>
+    </a>
+    <div class="scene-corner-meta" aria-hidden="true">
+      <span>FIELD SURVEY / 01</span>
+      <span>AGRICULTURE / WEST ROW</span>
+    </div>
+    <div class="scene-corner-status" aria-hidden="true">
+      <span id="sceneTelemetry">FIELD / PASSIVE</span>
+      <span>WINDOW / PANE 01</span>
+    </div>
+    <div class="auth-card login-card-official">
       <div class="brand">CiaoChat</div>
       <p class="sub">Entra o crea il tuo account per iniziare a chattare.</p>
 
@@ -27,29 +58,36 @@
       <!-- Login -->
       <form id="loginForm" class="form-panel active">
         <div class="field">
-          <label>Username</label>
-          <input type="text" name="username" placeholder="TuoUsername" autocomplete="username" required>
+          <label for="loginIdentifier">Username o email</label>
+          <div class="login-input-shell">
+            <i class="ph ph-user login-input-icon" aria-hidden="true"></i>
+            <input id="loginIdentifier" type="text" name="username" placeholder="TuoUsername o email" autocomplete="username" required>
+          </div>
         </div>
         <div class="field">
-          <label>Password</label>
-          <input type="password" name="password" placeholder="••••••••" autocomplete="current-password" required>
+          <label for="loginPassword">Password</label>
+          <div class="login-input-shell">
+            <i class="ph ph-lock-key login-input-icon" aria-hidden="true"></i>
+            <input id="loginPassword" type="password" name="password" placeholder="••••••••" autocomplete="current-password" required>
+            <button class="login-visibility-toggle" id="loginPasswordToggle" type="button" aria-controls="loginPassword" aria-pressed="false">Mostra</button>
+          </div>
         </div>
-        <button class="btn btn-primary" type="submit">Accedi</button>
+        <button class="btn btn-primary login-submit" type="submit">Accedi</button>
       </form>
 
       <!-- Register -->
       <form id="registerForm" class="form-panel">
         <div class="field">
-          <label>Username</label>
-          <input type="text" name="username" placeholder="Scegli un username" autocomplete="username" required>
+          <label for="registerUsername">Username</label>
+          <input id="registerUsername" type="text" name="username" placeholder="Scegli un username" autocomplete="username" required>
         </div>
         <div class="field">
-          <label>Password</label>
-          <input type="password" name="password" placeholder="••••••••" autocomplete="new-password" required>
+          <label for="registerPassword">Password</label>
+          <input id="registerPassword" type="password" name="password" placeholder="••••••••" autocomplete="new-password" required>
         </div>
         <div class="field">
-          <label>Email</label>
-          <input type="email" name="email" placeholder="nome@example.com" autocomplete="email" required>
+          <label for="registerEmail">Email</label>
+          <input id="registerEmail" type="email" name="email" placeholder="nome@example.com" autocomplete="email" required>
         </div>
         <button class="btn btn-primary" id="registerSubmit" type="submit">Crea account</button>
       </form>
@@ -358,7 +396,9 @@
     </div>
   </div>
 </div>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="static/twemoji.min.js"></script>
+<script defer src="static/login-scene.js"></script>
 <script src="static/app.js"></script>
 </body>
 </html>

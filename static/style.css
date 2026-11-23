@@ -34,6 +34,71 @@ html, body {
   -webkit-font-smoothing: antialiased;
 }
 
+.brand-intro {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background: #080c16;
+  color: #eef1ff;
+  opacity: 1;
+  transition: opacity 220ms cubic-bezier(0.65, 0, 0.35, 1);
+}
+.brand-intro.is-fading {
+  opacity: 0;
+  pointer-events: none;
+}
+.brand-morph {
+  display: block;
+  width: min(76vw, 760px);
+  overflow: visible;
+}
+.brand-word {
+  fill: currentColor;
+  font-family: Inter, Arial, sans-serif;
+  font-size: 98px;
+  font-weight: 750;
+  letter-spacing: -7px;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.brand-ciao {
+  animation: ciaoImpact 2000ms cubic-bezier(0.18, 0.8, 0.2, 1) both;
+}
+.brand-chat {
+  animation: chatImpact 2000ms cubic-bezier(0.18, 0.8, 0.2, 1) both;
+}
+.brand-mark {
+  color: currentColor;
+  opacity: 1;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: brandMarkImpact 2000ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+@keyframes ciaoImpact {
+  0% { opacity: 1; transform: translateX(-680px) scaleX(1); animation-timing-function: cubic-bezier(0.68, 0, 0.98, 0.18); }
+  30% { opacity: 1; transform: translateX(18px) scaleX(1); animation-timing-function: cubic-bezier(0.2, 1.7, 0.35, 1); }
+  37.95% { opacity: 1; transform: translateX(25px) scaleX(0.86); animation-timing-function: steps(1, end); }
+  38% { opacity: 0; transform: translateX(125px) scaleX(0.02); }
+  100% { opacity: 0; transform: translateX(125px) scaleX(0.02); }
+}
+@keyframes chatImpact {
+  0% { opacity: 1; transform: translateX(680px) scaleX(1); animation-timing-function: cubic-bezier(0.68, 0, 0.98, 0.18); }
+  30% { opacity: 1; transform: translateX(-18px) scaleX(1); animation-timing-function: cubic-bezier(0.2, 1.7, 0.35, 1); }
+  37.95% { opacity: 1; transform: translateX(-25px) scaleX(0.86); animation-timing-function: steps(1, end); }
+  38% { opacity: 0; transform: translateX(-95px) scaleX(0.02); }
+  100% { opacity: 0; transform: translateX(-95px) scaleX(0.02); }
+}
+@keyframes brandMarkImpact {
+  0%, 37.95% { opacity: 0; transform: translate(0, 0) rotate(0) scale(0.55); animation-timing-function: steps(1, end); }
+  38% { opacity: 1; transform: translate(8px, 1px) rotate(2deg) scale(0.94); }
+  48% { opacity: 1; transform: translate(-4px, -1px) rotate(-1deg) scale(1.08); }
+  60% { opacity: 1; transform: translate(1px, 0) rotate(0.25deg) scale(0.98); }
+  72%, 100% { opacity: 1; transform: translate(0, 0) rotate(0) scale(1); }
+}
+
 a { color: inherit; text-decoration: none; }
 button {
   font-family: inherit;
@@ -72,6 +137,26 @@ input::placeholder { color: var(--text-muted); }
   border-radius: var(--radius);
   padding: 40px 32px;
   box-shadow: var(--shadow);
+}
+
+.login-card-official {
+  max-width: 430px;
+  padding: 28px 32px 26px;
+  border-color: rgba(190, 202, 255, 0.13);
+  border-radius: 24px;
+  background: linear-gradient(145deg, rgba(28, 37, 61, 0.96), rgba(15, 21, 37, 0.98));
+  box-shadow: 0 32px 90px rgba(0, 0, 0, 0.45), inset 0 1px rgba(255, 255, 255, 0.07);
+}
+.login-card-official .brand {
+  color: #aab5ff;
+  font-size: 0.78rem;
+  letter-spacing: 0.16em;
+  text-align: center;
+  text-transform: uppercase;
+}
+.login-card-official .sub {
+  margin-bottom: 8px;
+  text-align: center;
 }
 
 .brand {
@@ -144,6 +229,52 @@ input::placeholder { color: var(--text-muted); }
 .field input:focus {
   border-color: var(--accent);
 }
+.login-card-official .field { margin-bottom: 14px; }
+.login-input-shell {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 0 13px;
+  border: 1px solid rgba(188, 200, 245, 0.17);
+  border-radius: 12px;
+  background: rgba(7, 11, 22, 0.62);
+  transition: border-color 180ms ease, box-shadow 180ms ease, background 180ms ease;
+}
+.login-input-shell:focus-within {
+  border-color: rgba(146, 159, 255, 0.8);
+  background: rgba(10, 15, 29, 0.9);
+  box-shadow: 0 0 0 4px rgba(119, 137, 255, 0.12);
+}
+.login-input-shell .login-input-icon {
+  flex: 0 0 auto;
+  color: #8995bd;
+  font-size: 18px;
+}
+.login-input-shell input {
+  width: 100%;
+  min-width: 0;
+  height: 46px;
+  flex: 1;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  outline: 0;
+  background: transparent;
+  color: #f3f5ff;
+  font-size: 0.91rem;
+}
+.login-input-shell input::placeholder { color: #737f9f; }
+.login-visibility-toggle {
+  flex: 0 0 auto;
+  padding: 6px 0 6px 6px;
+  color: #aab5ff;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+.login-visibility-toggle:hover { color: #d6dcff; }
+.login-submit { min-height: 48px; margin-top: 2px; border-radius: 12px; }
+.login-card-official .auth-msg { margin-top: 12px; text-align: center; }
 
 .btn {
   display: inline-flex;
@@ -1190,6 +1321,10 @@ body.theme-light .member-identifier-wrap,
 body.theme-light .inline-contact-add input,
 body.theme-light .keybind-recorder,
 body.theme-light #auditFilter { background: #fff; color: var(--text-primary); }
+body.theme-light .login-input-shell { border-color: var(--border-subtle); background: #fff; }
+body.theme-light .login-input-shell input { background: transparent; color: var(--text-primary); }
+body.theme-light .login-input-shell input::placeholder { color: var(--text-muted); }
+body.theme-light .login-visibility-toggle { color: var(--accent-primary); }
 body.theme-light .field input:disabled,
 body.theme-light .setting-field input:disabled { background: #f1f5f9; color: var(--text-secondary); }
 body.theme-light .conv-header,
@@ -1325,6 +1460,23 @@ body.theme-light button:disabled { opacity: 0.55; cursor: not-allowed; }
   .settings-dialog { grid-template-columns: 58px minmax(0, 1fr); }
 }
 
+@media (max-width: 520px) {
+  .brand-morph { width: 92vw; }
+  .brand-word { font-size: 92px; }
+}
+
+@media (max-width: 480px) {
+  .login-card-official { padding: 24px 22px 22px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .brand-word,
+  .brand-mark { animation: none; }
+  .brand-word { opacity: 0; transform: none; }
+  .brand-mark { opacity: 1; transform: scale(1); }
+  .brand-intro { transition-duration: 160ms; }
+}
+
 /* Utility */
 .hidden { display: none !important; }
 
@@ -1427,6 +1579,219 @@ body.theme-glass .unsaved-bar {
   background: rgba(12, 17, 29, 0.48);
   backdrop-filter: blur(20px) saturate(150%);
   -webkit-backdrop-filter: blur(20px) saturate(150%);
+}
+
+#authShell {
+  --text-primary: #111;
+  --text-secondary: #333;
+  --text-muted: #666;
+  --accent-primary: #111;
+  --accent-hover: #333;
+  --surface: #fff;
+  --surface-hover: #f2f2f2;
+  --border-subtle: #d3d3d3;
+  --border-strong: #888;
+  --border: #d3d3d3;
+  --text: #111;
+  --accent: #111;
+  --success: #17643a;
+  --danger: #b42318;
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  min-height: 100vh;
+  background: #08100b;
+  color: #111;
+  color-scheme: light;
+}
+
+#authShell .farm-scene,
+#authShell .login-scene,
+#authShell .glass-pane,
+#authShell .ascii-field {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+#authShell .farm-scene {
+  z-index: 0;
+  background: linear-gradient(180deg, #8b9b8a, #3e593c 60%, #19281b);
+}
+
+#authShell .login-scene {
+  z-index: 1;
+  background: transparent;
+}
+
+#authShell .ascii-field {
+  z-index: 2;
+}
+
+#authShell .glass-pane {
+  z-index: 3;
+  backdrop-filter: blur(0.65px) saturate(1.08);
+  -webkit-backdrop-filter: blur(0.65px) saturate(1.08);
+}
+
+#authShell .login-brand-corner {
+  position: absolute;
+  z-index: 4;
+  top: 26px;
+  left: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: #f0f3ee;
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  pointer-events: none;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
+}
+
+#authShell .scene-corner-meta,
+#authShell .scene-corner-status {
+  position: absolute;
+  z-index: 4;
+  display: grid;
+  gap: 5px;
+  color: rgba(238, 243, 235, 0.72);
+  font: 9px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.12em;
+  pointer-events: none;
+  text-align: right;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+  text-transform: uppercase;
+}
+
+#authShell .scene-corner-meta {
+  top: 27px;
+  right: 30px;
+}
+
+#authShell .scene-corner-meta span:first-child,
+#authShell .scene-corner-status span:first-child {
+  color: #f0f3ee;
+}
+
+#authShell .scene-corner-status {
+  right: 30px;
+  bottom: 25px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(238, 243, 235, 0.34);
+}
+
+#authShell .login-brand-corner svg {
+  width: 36px;
+  height: 28px;
+}
+
+#authShell .login-card-official {
+  position: relative;
+  z-index: 5;
+  border-color: #d6d6d6;
+  background: rgba(255, 255, 255, 0.91);
+  color: #111;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(14px) saturate(1.12);
+  -webkit-backdrop-filter: blur(14px) saturate(1.12);
+}
+
+#authShell .login-card-official .brand,
+#authShell .login-card-official .sub,
+#authShell .login-card-official .field label {
+  color: #111;
+}
+
+#authShell .login-card-official .tab {
+  color: #444;
+}
+
+#authShell .login-card-official .tab:hover {
+  color: #000;
+}
+
+#authShell .login-card-official .tab.active {
+  border-color: #111;
+  background: #111;
+  color: #fff;
+}
+
+#authShell .login-card-official .field input {
+  border-color: #c8c8c8;
+  background: #fff;
+  color: #111;
+}
+
+#authShell .login-input-shell {
+  border-color: #c8c8c8;
+  background: #fff;
+}
+
+#authShell .login-input-shell:focus-within {
+  border-color: #111;
+  background: #fff;
+  box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.1);
+}
+
+#authShell .login-input-shell .login-input-icon {
+  color: #333;
+}
+
+#authShell .login-input-shell input {
+  background: transparent;
+  color: #111;
+}
+
+#authShell .login-input-shell input::placeholder,
+#authShell .login-card-official .field input::placeholder {
+  color: #666;
+}
+
+#authShell .login-visibility-toggle {
+  color: #111;
+}
+
+#authShell .login-visibility-toggle:hover {
+  color: #444;
+}
+
+#authShell .login-card-official .btn-primary {
+  background: #111;
+  color: #fff;
+}
+
+#authShell .login-card-official .btn-primary:hover {
+  background: #333;
+}
+
+#authShell .login-card-official .btn-primary:disabled {
+  background: #555;
+}
+
+#authShell #authMsg.error { color: #b42318; }
+#authShell #authMsg.success { color: #17643a; }
+
+@media (max-width: 520px) {
+  #authShell .login-brand-corner {
+    top: 18px;
+    left: 18px;
+    font-size: 0.72rem;
+  }
+  #authShell .login-brand-corner svg {
+    width: 30px;
+    height: 24px;
+  }
+  #authShell .scene-corner-meta {
+    top: 18px;
+    right: 18px;
+    font-size: 8px;
+  }
+  #authShell .scene-corner-status { display: none; }
 }
 body.theme-glass .messages {
   background:
@@ -1541,4 +1906,119 @@ body.theme-glass ::-webkit-scrollbar-thumb:hover {
 body.theme-glass.reduced-motion::before,
 body.theme-glass.reduced-motion::after {
   animation: none;
+}
+
+body .sidebar {
+  animation: panelEnterLeft 800ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+body .context-sidebar {
+  animation: panelEnterRight 800ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+body .conv-header {
+  animation: headerEnter 650ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+body .composer {
+  animation: composerEnter 750ms 120ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+body .auth-card {
+  animation: authCardEnter 900ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+body .settings-dialog,
+body .profile-dialog,
+body .contact-profile-dialog {
+  animation: modalEnter 700ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+body .auth-card,
+body .settings-dialog,
+body .profile-dialog,
+body .contact-profile-dialog,
+body .conv-header,
+body .composer {
+  position: relative;
+}
+body .conv-profile-button,
+body .conv-actions,
+body .settings-main,
+body .settings-sidebar,
+body .composer-inner,
+body .contact-profile-content {
+  position: relative;
+  z-index: 1;
+}
+
+@keyframes panelEnterLeft {
+  from { opacity: 0; transform: translateX(-24px) scale(0.985); }
+  to { opacity: 1; transform: translateX(0) scale(1); }
+}
+@keyframes panelEnterRight {
+  from { opacity: 0; transform: translateX(24px) scale(0.985); }
+  to { opacity: 1; transform: translateX(0) scale(1); }
+}
+@keyframes headerEnter {
+  from { opacity: 0; transform: translateY(-18px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes composerEnter {
+  from { opacity: 0; transform: translateY(24px) scale(0.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes authCardEnter {
+  from { opacity: 0; transform: translateY(28px) scale(0.96); filter: blur(8px); }
+  to { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+}
+@keyframes modalEnter {
+  from { opacity: 0; transform: translateY(16px) scale(0.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+body .motion-reveal {
+  animation: itemReveal 700ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation-delay: var(--motion-delay, 0ms);
+}
+@keyframes itemReveal {
+  from { opacity: 0; transform: translateY(14px) scale(0.97); filter: blur(4px); }
+  to { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+}
+body .msg {
+  transform-origin: bottom;
+  transition: transform 240ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 240ms ease, border-color 240ms ease;
+}
+body .msg:hover {
+  transform: translateY(-2px);
+  border-color: var(--border-strong);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.16);
+}
+body .brand-inline,
+body .conv-name {
+  transition: color 240ms ease, text-shadow 240ms ease;
+}
+body .brand-inline:hover,
+body .conv-name:hover {
+  color: var(--text);
+  text-shadow: 0 0 18px color-mix(in srgb, var(--accent) 50%, transparent);
+}
+body .contact-item,
+body .community-item,
+body .participant-row,
+body .icon-btn,
+body .btn {
+  transform-style: preserve-3d;
+}
+
+body.reduced-motion *,
+body.reduced-motion *::before,
+body.reduced-motion *::after {
+  animation-duration: 0.001ms !important;
+  animation-delay: 0ms !important;
+  transition-duration: 0.001ms !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body *,
+  body *::before,
+  body *::after {
+    animation-duration: 0.001ms !important;
+    animation-delay: 0ms !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
 }

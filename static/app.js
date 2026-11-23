@@ -163,6 +163,7 @@ function showAuth() {
 function showMessenger() {
   authShell.style.display = "none";
   messenger.style.display = "flex";
+  revealMotionItems(messenger);
 }
 
 function setAuthMsg(text, type = "error") {
@@ -203,6 +204,18 @@ loginForm.addEventListener("submit", e => {
     btn.disabled = false;
     btn.textContent = originalText;
   }, 2000);
+});
+
+const loginPassword = el("loginPassword");
+const loginPasswordToggle = el("loginPasswordToggle");
+let loginPasswordVisible = false;
+
+loginPasswordToggle.addEventListener("click", () => {
+  loginPasswordVisible = loginPassword.type === "password";
+  loginPassword.type = loginPasswordVisible ? "text" : "password";
+  loginPasswordToggle.textContent = loginPasswordVisible ? "Nascondi" : "Mostra";
+  loginPasswordToggle.setAttribute("aria-pressed", String(loginPasswordVisible));
+  loginPassword.focus();
 });
 
 registerForm.addEventListener("submit", e => {
@@ -276,6 +289,7 @@ function renderContacts() {
   if (visibleContacts.length === 0) {
     contactList.appendChild(makeEmptyItem());
     if (query && contacts.length) contactList.lastElementChild.textContent = "Nessun contatto corrispondente.";
+    revealMotionItems(contactList);
     return;
   }
   visibleContacts.forEach(c => {
@@ -306,6 +320,7 @@ function renderContacts() {
     });
     contactList.appendChild(item);
   });
+  revealMotionItems(contactList);
 }
 
 contactSearch.addEventListener("input", renderContacts);
@@ -347,6 +362,7 @@ function renderCommunityList(communities) {
     empty.textContent = "Nessun gruppo";
     list.appendChild(empty);
   }
+  revealMotionItems(list);
 }
 
 function selectCommunity(communityId) {
@@ -563,6 +579,7 @@ function renderParticipants(community) {
       : "No participants yet.";
     participantDirectory.appendChild(empty);
   }
+  revealMotionItems(participantDirectory);
 }
 
 function showCommunityInChat(community) {
@@ -733,6 +750,7 @@ function appendCommunityMessage(item) {
   const placeholder = messages.querySelector(".msg-placeholder");
   if (placeholder) placeholder.remove();
   messages.appendChild(div);
+  revealMotionItems(div);
   scrollBottom();
 }
 
@@ -1099,6 +1117,7 @@ function renderSelectedContact() {
   const profile = contactProfile(selectedContact);
   const name = profile?.name || profile?.username || selectedContact || "Scegli un contatto";
   convName.textContent = name;
+  scrambleText(convName);
   styleName(convName, profile);
   convAvatar.replaceChildren();
   convAvatar.textContent = avatarInitial(name);
@@ -1406,6 +1425,7 @@ function applyLiveAppearance() {
   if (localSettings.density === "compact") document.body.classList.add("message-compact");
   if (localSettings.reducedMotion) document.body.classList.add("reduced-motion");
   document.documentElement.style.fontSize = `${localSettings.fontSize}%`;
+  revealMotionItems(document);
   renderComposerEmoji();
   if ("setAppBadge" in navigator && localSettings.unreadBadge) navigator.setAppBadge(0).catch(() => {});
   if ("clearAppBadge" in navigator && !localSettings.unreadBadge) navigator.clearAppBadge().catch(() => {});
@@ -1422,6 +1442,99 @@ if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
     });
   }, { passive: true });
 }
+
+const scrambleFrames = new WeakMap();
+
+function scrambleText(element, duration = 620) {
+  if (!element || document.body.classList.contains("reduced-motion")) return;
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+
+  const finalText = element.textContent || "";
+  if (!finalText) return;
+  const previousFrame = scrambleFrames.get(element);
+  if (previousFrame) cancelAnimationFrame(previousFrame);
+  element.dataset.scrambling = "true";
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/+_-#";
+  const start = performance.now();
+  let frame = null;
+
+  const tick = now => {
+    const progress = Math.min((now - start) / duration, 1);
+    const resolved = Math.floor(progress * finalText.length);
+    let output = "";
+    for (let index = 0; index < finalText.length; index++) {
+      if (/\s/.test(finalText[index])) {
+        output += finalText[index];
+      } else if (index < resolved) {
+        output += finalText[index];
+      } else {
+        output += chars[Math.floor(Math.random() * chars.length)];
+      }
+    }
+    element.textContent = output;
+    if (progress < 1) {
+      frame = requestAnimationFrame(tick);
+      scrambleFrames.set(element, frame);
+    } else {
+      element.textContent = finalText;
+      delete element.dataset.scrambling;
+      scrambleFrames.delete(element);
+    }
+  };
+
+  frame = requestAnimationFrame(tick);
+  scrambleFrames.set(element, frame);
+}
+
+function revealMotionItems(root = document) {
+  if (document.body.classList.contains("reduced-motion")) return;
+
+  const targets = [
+    ...(root instanceof HTMLElement && root.matches(".auth-card, .sidebar-header, .conv-header, .composer, .contact-item, .community-item, .participant-row, .msg") ? [root] : []),
+    ...root.querySelectorAll(
+      ".auth-card, .sidebar-header, .conv-header, .composer, .contact-item, .community-item, .participant-row, .msg"
+    ),
+  ];
+  targets.forEach((target, index) => {
+    if (target.classList.contains("motion-reveal")) return;
+    const isMessage = target.classList.contains("msg");
+    target.style.setProperty("--motion-delay", `${isMessage ? 0 : Math.min(index * 24, 180)}ms`);
+    target.classList.add("motion-reveal");
+  });
+}
+
+function applyMotionTilt(element, event) {
+  if (document.body.classList.contains("reduced-motion")) return;
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const rect = element.getBoundingClientRect();
+  if (!rect.width || !rect.height) return;
+  const pointerX = (event?.clientX ?? rect.left + rect.width / 2) - rect.left;
+  const pointerY = (event?.clientY ?? rect.top + rect.height / 2) - rect.top;
+  const rotateY = ((pointerX / rect.width) - 0.5) * 3;
+  const rotateX = ((pointerY / rect.height) - 0.5) * -3;
+  element.style.transform = `perspective(700px) rotateX(${rotateX}deg) rotateY(${rotateY}deg) translateY(-1px)`;
+}
+
+document.addEventListener("pointermove", event => {
+  const element = event.target.closest(
+    ".contact-item, .community-item, .participant-row, .icon-btn, .btn"
+  );
+  if (!element) return;
+  if (element.matches(":disabled")) return;
+  if (element.dataset.tiltFrame) cancelAnimationFrame(Number(element.dataset.tiltFrame));
+  element.dataset.tiltFrame = String(requestAnimationFrame(() => {
+    applyMotionTilt(element, event);
+    delete element.dataset.tiltFrame;
+  }));
+}, { passive: true });
+
+document.addEventListener("pointerout", event => {
+  const element = event.target.closest(
+    ".contact-item, .community-item, .participant-row, .icon-btn, .btn"
+  );
+  if (element && event.relatedTarget instanceof Node && element.contains(event.relatedTarget)) return;
+  if (element) element.style.transform = "";
+});
 
 function markUnsaved() {
   el("unsavedBar").classList.remove("hidden");
@@ -3073,6 +3186,7 @@ function appendMessage(from, text, kind, ts, silent, attachment = null) {
     if (placeholder) messages.insertBefore(div, placeholder);
     else messages.appendChild(div);
   }
+  revealMotionItems(div);
   if (!silent) scrollBottom();
 }
 
@@ -3101,5 +3215,36 @@ function appendSystemMessage(text) {
 function scrollBottom() { messages.scrollTop = messages.scrollHeight; }
 
 // Bootstrap
+const brandIntro = document.getElementById("brandIntro");
+const appRoot = document.getElementById("app");
+const reducedIntroMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const introMorphDuration = reducedIntroMotion ? 1 : 2000;
+const introFadeDuration = reducedIntroMotion ? 160 : 300;
+window.setTimeout(() => {
+  brandIntro.classList.add("is-fading");
+  appRoot.removeAttribute("aria-hidden");
+  appRoot.removeAttribute("inert");
+}, introMorphDuration);
+window.setTimeout(() => brandIntro.remove(), introMorphDuration + introFadeDuration);
+
+function restoreAuthHandoff() {
+  const handoffKey = "ciaochat.auth-handoff";
+  try {
+    const raw = sessionStorage.getItem(handoffKey);
+    if (!raw) return;
+    sessionStorage.removeItem(handoffKey);
+    const handoff = JSON.parse(raw);
+    if (typeof handoff.id !== "string" || typeof handoff.token !== "string") {
+      console.warn("[auth] Ignoring an invalid standalone login handoff.");
+      return;
+    }
+    token = handoff.token;
+    me = { id: handoff.id };
+  } catch (error) {
+    console.error("[auth] Could not restore the standalone login session.", error);
+  }
+}
+
 applyLiveAppearance();
+restoreAuthHandoff();
 connect();

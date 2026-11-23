@@ -1,0 +1,450 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#07100b">
+  <title>CiaoChat — Accedi</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: #111;
+      background: #07100b;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      width: 100%;
+      min-width: 320px;
+      min-height: 100%;
+      height: 100%;
+      margin: 0;
+    }
+
+    body { overflow: hidden; }
+
+    .shell {
+      position: relative;
+      display: grid;
+      min-height: 100vh;
+      height: 100%;
+      place-items: center;
+      overflow: auto;
+      padding: 90px 20px 76px;
+      isolation: isolate;
+      background: #07100b;
+    }
+
+    .scene-canvas {
+      position: absolute;
+      inset: 0;
+      display: block;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+
+    #farmScene { z-index: 0; background: #465e42; }
+    #loginScene { z-index: 1; background: transparent; }
+    #asciiField { z-index: 2; }
+    #glassPane {
+      z-index: 3;
+      backdrop-filter: blur(0.65px) saturate(1.08);
+      -webkit-backdrop-filter: blur(0.65px) saturate(1.08);
+    }
+
+    .login-brand-corner {
+      position: absolute;
+      z-index: 4;
+      top: 26px;
+      left: 30px;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      color: #f0f3ee;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.2em;
+      text-decoration: none;
+      pointer-events: auto;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
+    }
+
+    .login-brand-corner svg { width: 36px; height: 28px; }
+
+    .scene-corner-meta,
+    .scene-corner-status {
+      position: absolute;
+      z-index: 4;
+      display: grid;
+      gap: 5px;
+      color: rgba(238, 243, 235, 0.72);
+      font: 9px/1.35 "SFMono-Regular", Consolas, monospace;
+      letter-spacing: 0.12em;
+      pointer-events: none;
+      text-align: right;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+      text-transform: uppercase;
+    }
+
+    .scene-corner-meta { top: 27px; right: 30px; }
+    .scene-corner-meta span:first-child,
+    .scene-corner-status span:first-child { color: #f0f3ee; }
+    .scene-corner-status {
+      right: 30px;
+      bottom: 26px;
+      padding-top: 8px;
+      border-top: 1px solid rgba(238, 243, 235, 0.34);
+    }
+
+    .auth-card {
+      position: relative;
+      z-index: 5;
+      width: min(430px, 100%);
+      padding: 28px 32px 26px;
+      border: 1px solid rgba(255, 255, 255, 0.6);
+      border-radius: 24px;
+      background: rgba(255, 255, 255, 0.91);
+      box-shadow: 0 24px 64px rgba(0, 0, 0, 0.28);
+      backdrop-filter: blur(14px) saturate(1.12);
+      -webkit-backdrop-filter: blur(14px) saturate(1.12);
+    }
+
+    .brand {
+      margin-bottom: 4px;
+      color: #111;
+      font-size: 0.78rem;
+      font-weight: 700;
+      letter-spacing: 0.16em;
+      text-align: center;
+      text-transform: uppercase;
+    }
+
+    .sub {
+      margin: 0 0 8px;
+      color: #444;
+      font-size: 0.875rem;
+      text-align: center;
+    }
+
+    .tabs { display: flex; gap: 8px; margin: 20px 0 24px; }
+
+    button, input { font: inherit; }
+    button { cursor: pointer; }
+
+    .tab {
+      flex: 1;
+      padding: 10px;
+      border: 1px solid transparent;
+      border-radius: 8px;
+      background: transparent;
+      color: #444;
+      font-size: 0.875rem;
+      transition: background 160ms ease, color 160ms ease;
+    }
+
+    .tab.active { border-color: #111; background: #111; color: #fff; }
+    .form-panel { display: none; }
+    .form-panel.active { display: block; }
+    .field { margin-bottom: 14px; }
+
+    .field label {
+      display: block;
+      margin-bottom: 6px;
+      color: #333;
+      font-size: 0.72rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .field input {
+      width: 100%;
+      min-height: 46px;
+      padding: 10px 12px;
+      border: 1px solid #c8c8c8;
+      border-radius: 9px;
+      outline: none;
+      background: #fff;
+      color: #111;
+    }
+
+    .field input:focus { border-color: #111; box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.1); }
+    .field input::placeholder { color: #666; }
+
+    .password-wrap { display: flex; align-items: center; gap: 8px; }
+    .password-wrap input { min-width: 0; }
+    .visibility-toggle { border: 0; background: none; color: #111; font-size: 0.75rem; font-weight: 700; }
+
+    .submit {
+      width: 100%;
+      min-height: 48px;
+      margin-top: 2px;
+      border: 0;
+      border-radius: 12px;
+      background: #111;
+      color: #fff;
+      font-weight: 650;
+    }
+
+    .submit:hover { background: #333; }
+    .submit:disabled { cursor: wait; opacity: 0.64; }
+    #authMsg { min-height: 1.2em; margin-top: 12px; color: #b42318; font-size: 0.82rem; text-align: center; }
+    #authMsg.success { color: #17643a; }
+    [hidden] { display: none !important; }
+
+    .field-status {
+      position: absolute;
+      z-index: 4;
+      bottom: 26px;
+      left: 30px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: #e2ece1;
+      font: 9px "SFMono-Regular", Consolas, monospace;
+      letter-spacing: 0.12em;
+      pointer-events: none;
+    }
+
+    .field-status::before {
+      width: 6px;
+      height: 6px;
+      border: 1px solid #a7d7a4;
+      background: #a7d7a4;
+      content: "";
+    }
+
+    @media (max-width: 520px) {
+      .shell { padding: 76px 16px 70px; }
+      .login-brand-corner { top: 18px; left: 18px; font-size: 11px; }
+      .login-brand-corner svg { width: 30px; height: 24px; }
+      .scene-corner-meta { top: 18px; right: 18px; font-size: 8px; }
+      .scene-corner-status { display: none; }
+      .auth-card { padding: 24px 22px 22px; }
+      .field-status { bottom: 20px; left: 18px; }
+    }
+
+    @media (max-height: 620px) {
+      .shell { place-items: start center; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell" id="authShell">
+    <canvas class="scene-canvas" id="farmScene" aria-hidden="true"></canvas>
+    <canvas class="scene-canvas" id="loginScene" aria-hidden="true"></canvas>
+    <canvas class="scene-canvas" id="glassPane" aria-hidden="true"></canvas>
+    <canvas class="scene-canvas" id="asciiField" aria-hidden="true"></canvas>
+
+    <a class="login-brand-corner" href="../" aria-label="CiaoChat">
+      <svg viewBox="0 0 64 48" aria-hidden="true">
+        <path d="M28 8C22 3 12 4 7 10 2 17 4 26 10 31c6 5 15 5 21 0M36 8c6-5 16-4 21 2 5 7 3 16-3 21-6 5-15 5-21 0" fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round"/>
+        <path d="m34 28-7 15 15-9" fill="currentColor"/>
+      </svg>
+      <span>CIAOCHAT</span>
+    </a>
+    <div class="scene-corner-meta" aria-hidden="true">
+      <span>FIELD SURVEY / 01</span>
+      <span>AGRICULTURE / WEST ROW</span>
+    </div>
+    <div class="scene-corner-status" aria-hidden="true">
+      <span id="sceneTelemetry">FIELD / PASSIVE</span>
+      <span>WINDOW / PANE 01</span>
+    </div>
+
+    <section class="auth-card">
+      <div class="brand">CiaoChat</div>
+      <p class="sub">Entra o crea il tuo account per iniziare a chattare.</p>
+
+      <div class="tabs" role="tablist" aria-label="Autenticazione">
+        <button class="tab active" type="button" data-tab="login" role="tab" aria-selected="true">Accedi</button>
+        <button class="tab" type="button" data-tab="register" role="tab" aria-selected="false">Registrati</button>
+      </div>
+
+      <form id="loginForm" class="form-panel active">
+        <div class="field">
+          <label for="loginIdentifier">Username o email</label>
+          <input id="loginIdentifier" type="text" name="username" placeholder="TuoUsername o email" autocomplete="username" required>
+        </div>
+        <div class="field">
+          <label for="loginPassword">Password</label>
+          <div class="password-wrap">
+            <input id="loginPassword" type="password" name="password" placeholder="••••••••" autocomplete="current-password" required>
+            <button class="visibility-toggle" id="loginPasswordToggle" type="button" aria-controls="loginPassword" aria-pressed="false">Mostra</button>
+          </div>
+        </div>
+        <div class="field" id="otpField" hidden>
+          <label for="loginOtp">Codice di autenticazione</label>
+          <input id="loginOtp" type="text" name="otp" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code">
+        </div>
+        <button class="submit" type="submit">Accedi</button>
+      </form>
+
+      <form id="registerForm" class="form-panel">
+        <div class="field">
+          <label for="registerUsername">Username</label>
+          <input id="registerUsername" type="text" name="username" maxlength="20" placeholder="Scegli un username" autocomplete="username" required>
+        </div>
+        <div class="field">
+          <label for="registerPassword">Password</label>
+          <input id="registerPassword" type="password" name="password" minlength="8" maxlength="128" placeholder="Almeno 8 caratteri" autocomplete="new-password" required>
+        </div>
+        <div class="field">
+          <label for="registerEmail">Email</label>
+          <input id="registerEmail" type="email" name="email" maxlength="254" placeholder="nome@example.com" autocomplete="email" required>
+        </div>
+        <button class="submit" type="submit">Crea account</button>
+      </form>
+
+      <div id="authMsg" role="status" aria-live="polite"></div>
+    </section>
+
+    <div class="field-status" id="fieldStatus" aria-hidden="true">CAMPO / IN ATTESA</div>
+  </main>
+
+  <script>
+    (() => {
+      const wsUrl = (location.protocol === "https:" ? "wss:" : "ws:") + "//" + location.host + "/ws";
+      const socket = new WebSocket(wsUrl);
+      const loginForm = document.getElementById("loginForm");
+      const registerForm = document.getElementById("registerForm");
+      const authMsg = document.getElementById("authMsg");
+      const otpField = document.getElementById("otpField");
+      const loginOtp = document.getElementById("loginOtp");
+      const loginPassword = document.getElementById("loginPassword");
+      const passwordToggle = document.getElementById("loginPasswordToggle");
+      let activeForm = null;
+
+      function showMessage(text, success = false) {
+        authMsg.textContent = text;
+        authMsg.classList.toggle("success", success);
+      }
+
+      function setBusy(form, busy, label) {
+        const button = form.querySelector('button[type="submit"]');
+        if (busy) {
+          button.dataset.originalLabel = button.textContent;
+          button.textContent = label;
+        } else if (button.dataset.originalLabel) {
+          button.textContent = button.dataset.originalLabel;
+          delete button.dataset.originalLabel;
+        }
+        button.disabled = busy;
+      }
+
+      function sendAuth(form, message, label) {
+        if (socket.readyState !== WebSocket.OPEN) {
+          showMessage("Connessione al server non disponibile. Riprova.");
+          return;
+        }
+        activeForm = form;
+        setBusy(form, true, label);
+        showMessage("");
+        socket.send(JSON.stringify(message));
+      }
+
+      document.querySelectorAll(".tab").forEach(tab => {
+        tab.addEventListener("click", () => {
+          const registering = tab.dataset.tab === "register";
+          document.querySelectorAll(".tab").forEach(button => {
+            const selected = button === tab;
+            button.classList.toggle("active", selected);
+            button.setAttribute("aria-selected", String(selected));
+          });
+          loginForm.classList.toggle("active", !registering);
+          registerForm.classList.toggle("active", registering);
+          showMessage("");
+        });
+      });
+
+      loginForm.addEventListener("submit", event => {
+        event.preventDefault();
+        const data = new FormData(loginForm);
+        sendAuth(loginForm, {
+          t: "login",
+          user: data.get("username"),
+          pw: data.get("password"),
+          ...(otpField.hidden ? {} : { otp: data.get("otp") }),
+        }, "Accesso...");
+      });
+
+      registerForm.addEventListener("submit", event => {
+        event.preventDefault();
+        const data = new FormData(registerForm);
+        sendAuth(registerForm, {
+          t: "register",
+          user: data.get("username"),
+          pw: data.get("password"),
+          email: data.get("email"),
+        }, "Creazione...");
+      });
+
+      passwordToggle.addEventListener("click", () => {
+        const visible = loginPassword.type === "password";
+        loginPassword.type = visible ? "text" : "password";
+        passwordToggle.textContent = visible ? "Nascondi" : "Mostra";
+        passwordToggle.setAttribute("aria-pressed", String(visible));
+        loginPassword.focus();
+      });
+
+      socket.addEventListener("open", () => {
+        document.getElementById("fieldStatus").textContent = "CAMPO / CONNESSO";
+      });
+      socket.addEventListener("close", () => {
+        document.getElementById("fieldStatus").textContent = "CAMPO / DISCONNESSO";
+        if (activeForm) setBusy(activeForm, false);
+        showMessage("Connessione persa. Ricarica la pagina per riprovare.");
+      });
+      socket.addEventListener("error", event => {
+        console.error("[spy-login] WebSocket authentication connection failed.", event);
+      });
+      socket.addEventListener("message", event => {
+        let message;
+        try {
+          message = JSON.parse(event.data);
+        } catch (error) {
+          console.error("[spy-login] Could not parse the authentication response.", error);
+          showMessage("Risposta del server non valida.");
+          return;
+        }
+        if (message.t === "auth_challenge" && message.method === "totp") {
+          otpField.hidden = false;
+          loginOtp.required = true;
+          setBusy(loginForm, false);
+          activeForm = loginForm;
+          showMessage("Inserisci il codice di autenticazione a due fattori.", true);
+          loginOtp.focus();
+          return;
+        }
+        if (message.t === "err") {
+          if (activeForm) setBusy(activeForm, false);
+          showMessage(message.text || "Autenticazione non riuscita.");
+          activeForm = null;
+          return;
+        }
+        if (message.t !== "ok") return;
+        if (typeof message.id !== "string" || typeof message.token !== "string") {
+          showMessage("Risposta di accesso non valida.");
+          return;
+        }
+        try {
+          sessionStorage.setItem("ciaochat.auth-handoff", JSON.stringify({ id: message.id, token: message.token }));
+          location.replace("../");
+        } catch (error) {
+          console.error("[spy-login] Could not transfer the authenticated session.", error);
+          showMessage("Accesso riuscito, ma non è stato possibile aprire la chat. Torna alla pagina principale e accedi di nuovo.");
+          socket.close();
+        }
+      });
+    })();
+  </script>
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script defer src="login-scene.js"></script>
+</body>
+</html>

@@ -481,7 +481,14 @@ def handle_login(conn, m):
     password = str(m.get("pw", ""))
     if too_many_failures(conn.ip):
         return conn.send({"t": "err", "text": "Troppi tentativi. Riprova tra qualche minuto."})
-    key = resolve_user_key(m.get("user"))
+    identifier = str(m.get("user", "")).strip()
+    normalized_email = identifier.lower()
+    if EMAIL_RE.fullmatch(normalized_email):
+        email_key = hashlib.sha256(normalized_email.encode("utf-8")).hexdigest()
+        indexed_user = fb_get(f"email_index/{email_key}")
+        key = indexed_user.lower() if isinstance(indexed_user, str) and USERNAME_RE.fullmatch(indexed_user) else None
+    else:
+        key = resolve_user_key(identifier)
     rec = fb_get(f"users/{key}") if key else None
     # l'hash viene calcolato anche per utenti inesistenti: tempi di risposta uguali
     computed = hash_password(password, rec["salt"] if isinstance(rec, dict) else "00" * 16)
