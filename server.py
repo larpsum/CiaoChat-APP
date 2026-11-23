@@ -49,9 +49,10 @@ except ImportError:
 
 # ============================================================== CONFIGURAZIONE
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-SERVER_HOST = "127.0.0.1"
-SERVER_PORT = 5555
+SERVER_HOST = os.environ.get("PYCHAT_HOST", "127.0.0.1")
+SERVER_PORT = int(os.environ.get("PYCHAT_PORT", "5555"))
 SERVICE_ACCOUNT_FILE = os.environ.get("PYCHAT_SERVICE_ACCOUNT", os.path.join(BASE_DIR, "serviceAccountKey.json"))
+SERVICE_ACCOUNT_JSON = os.environ.get("PYCHAT_SERVICE_ACCOUNT_JSON", "")
 FIREBASE_DB_URL = os.environ.get(
     "PYCHAT_DB_URL", "https://ciaochat2-5ddfd-default-rtdb.europe-west1.firebasedatabase.app")
 DB_ROOT = "/pychat"                  # tutti i dati dell'app vivono sotto questo nodo
@@ -224,11 +225,15 @@ def fb_last(path, limit):
 
 
 def init_firebase():
-    if not os.path.exists(SERVICE_ACCOUNT_FILE):
+    if SERVICE_ACCOUNT_JSON:
+        cred = credentials.Certificate(json.loads(SERVICE_ACCOUNT_JSON))
+    elif os.path.exists(SERVICE_ACCOUNT_FILE):
+        cred = credentials.Certificate(SERVICE_ACCOUNT_FILE)
+    else:
         sys.exit(f"File credenziali non trovato: {SERVICE_ACCOUNT_FILE}\n"
                  "Scaricalo da Console Firebase > Impostazioni progetto > Account di servizio > "
-                 "Genera nuova chiave privata, poi salvalo come serviceAccountKey.json accanto a server.py.")
-    cred = credentials.Certificate(SERVICE_ACCOUNT_FILE)
+                 "Genera nuova chiave privata, poi salvalo come serviceAccountKey.json accanto a server.py, "
+                 "oppure imposta la variabile d'ambiente PYCHAT_SERVICE_ACCOUNT_JSON col contenuto del file.")
     firebase_admin.initialize_app(cred, {"databaseURL": FIREBASE_DB_URL})
     fb_get("users")  # prova di connessione: fallisce subito se URL o permessi sono sbagliati
     log(f"Firebase connesso: {FIREBASE_DB_URL}{DB_ROOT}")

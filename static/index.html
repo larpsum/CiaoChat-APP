@@ -4,8 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>CiaoChat</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://api.fontshare.com" crossorigin>
+<link href="https://api.fontshare.com/v2/css?f[]=general-sans@400,500,600,700&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/@phosphor-icons/web@2.1.1/src/regular/style.css">
 <link rel="stylesheet" href="https://unpkg.com/@phosphor-icons/web@2.1.1/src/bold/style.css">
@@ -27,6 +27,9 @@
 <div id="app" aria-hidden="true" inert>
   <!-- Auth shell -->
   <div class="shell" id="authShell">
+    <video class="bg-video" id="bgVideo" autoplay muted loop playsinline preload="auto">
+      <source src="static/assets/login-bg.mp4" type="video/mp4">
+    </video>
     <canvas class="farm-scene" id="farmScene" aria-hidden="true"></canvas>
     <canvas class="login-scene" id="loginScene" aria-hidden="true"></canvas>
     <canvas class="glass-pane" id="glassPane" aria-hidden="true"></canvas>
@@ -396,6 +399,7 @@
     </div>
   </div>
 </div>
+<script src="static/config.js"></script>
 <script src="static/twemoji.min.js"></script>
 <script type="module" src="static/login-scene.js"></script>
 <script src="static/app.js"></script>

@@ -3,7 +3,6 @@ import { GLTFLoader } from "./vendor/loaders/GLTFLoader.js";
 import { RGBELoader } from "./vendor/loaders/RGBELoader.js";
 import { EffectComposer } from "./vendor/postprocessing/EffectComposer.js";
 import { RenderPass } from "./vendor/postprocessing/RenderPass.js";
-import { BokehPass } from "./vendor/postprocessing/BokehPass.js";
 
 (() => {
   const shell = document.getElementById("authShell");
@@ -12,6 +11,9 @@ import { BokehPass } from "./vendor/postprocessing/BokehPass.js";
   const glassCanvas = document.getElementById("glassPane");
   const sceneTelemetry = document.getElementById("sceneTelemetry");
   const fieldStatus = document.getElementById("fieldStatus");
+  const bgVideo = document.getElementById("bgVideo");
+  const useVideoBg = !!bgVideo;
+  if (useVideoBg) shell.classList.add("has-bg-video");
   if (!shell || !sceneCanvas || !fieldCanvas || !glassCanvas) return;
 
   const field = fieldCanvas.getContext("2d");
@@ -36,7 +38,7 @@ import { BokehPass } from "./vendor/postprocessing/BokehPass.js";
   let pointerMovedAt = 0;
   let scanTriggered = false;
   let scans = [];
-  let raindrops = [];
+  let nextAutoScan = 0;
   let frame = 0;
   let running = false;
   let resizeObserver = null;
@@ -61,27 +63,9 @@ import { BokehPass } from "./vendor/postprocessing/BokehPass.js";
     }
   }
 
-  function createRaindrops() {
-    const count = Math.min(96, Math.round(width * height / 12500));
-    raindrops = Array.from({ length: count }, () => ({
-      x: random(0, width),
-      y: random(0, height),
-      radius: random(1.1, 3.8),
-      speed: random(2, 14),
-      gravity: random(18, 34),
-      maxSpeed: random(36, 82),
-      slipDelay: random(0.35, 1.4),
-      drift: random(-7, 7),
-      tail: random(7, 31),
-      phase: random(0, Math.PI * 2),
-      focus: random(0, 1),
-    }));
-  }
-
   function drawGlass(now, delta, force = false) {
     if (!force && now - lastGlassDraw < 24) return;
     lastGlassDraw = now;
-    const moving = !force && !reducedMotionQuery.matches && !document.body.classList.contains("reduced-motion");
     glass.clearRect(0, 0, width, height);
     const sheen = glass.createLinearGradient(0, 0, width, height);
     sheen.addColorStop(0, "rgba(236, 248, 239, 0.038)");
@@ -105,58 +89,32 @@ import { BokehPass } from "./vendor/postprocessing/BokehPass.js";
     }
     glass.restore();
 
-    for (const drop of raindrops) {
-      if (moving) {
-        drop.phase += delta * 1.4;
-        drop.slipDelay -= delta;
-        if (drop.slipDelay <= 0 && drop.speed > drop.maxSpeed * 0.62) {
-          drop.speed *= random(0.2, 0.42);
-          drop.slipDelay = random(0.5, 1.5);
-        }
-        drop.speed = Math.min(drop.maxSpeed, drop.speed + drop.gravity * delta);
-        drop.y += drop.speed * delta;
-        drop.x += (drop.drift + Math.sin(drop.phase) * 2) * delta;
-        if (drop.y - drop.tail > height) {
-          drop.y = -random(8, height * 0.3);
-          drop.x = random(0, width);
-          drop.speed = random(2, 14);
-          drop.gravity = random(18, 34);
-          drop.maxSpeed = random(36, 82);
-          drop.slipDelay = random(0.35, 1.4);
-        }
-      }
-      const radius = drop.radius;
-      const x = drop.x + (moving ? Math.sin(drop.phase) * 0.8 : 0);
-      const trailAlpha = drop.focus > 0.58 ? 0.12 : 0.055;
-      glass.save();
-      glass.lineCap = "round";
-      glass.strokeStyle = `rgba(226, 246, 235, ${trailAlpha})`;
-      glass.lineWidth = Math.max(0.6, radius * 0.48);
-      glass.beginPath();
-      glass.moveTo(x - drop.drift * 0.025, drop.y - drop.tail);
-      glass.quadraticCurveTo(x + radius * 0.2, drop.y - drop.tail * 0.42, x, drop.y - radius);
-      glass.stroke();
+    // Cinematic vignette over the whole pane.
+    const vignette = glass.createRadialGradient(
+      width / 2, height * 0.42, Math.min(width, height) * 0.35,
+      width / 2, height * 0.5, Math.max(width, height) * 0.75
+    );
+    vignette.addColorStop(0, "rgba(0,0,0,0)");
+    vignette.addColorStop(1, "rgba(2,6,10,0.42)");
+    glass.fillStyle = vignette;
+    glass.fillRect(0, 0, width, height);
+  }
 
-      const lens = glass.createRadialGradient(x - radius * 0.4, drop.y - radius * 0.55, 0.2, x, drop.y, radius * 1.8);
-      lens.addColorStop(0, "rgba(250, 255, 252, 0.48)");
-      lens.addColorStop(0.26, "rgba(207, 238, 222, 0.2)");
-      lens.addColorStop(0.67, "rgba(112, 160, 137, 0.12)");
-      lens.addColorStop(1, "rgba(240, 252, 245, 0.02)");
-      glass.fillStyle = lens;
-      glass.beginPath();
-      glass.ellipse(x, drop.y, radius * 0.76, radius * 1.42, drop.drift * 0.012, 0, Math.PI * 2);
-      glass.fill();
-      glass.strokeStyle = `rgba(237, 250, 242, ${0.19 + drop.focus * 0.13})`;
-      glass.lineWidth = 0.55;
-      glass.stroke();
-      glass.strokeStyle = "rgba(255, 255, 255, 0.52)";
-      glass.lineWidth = Math.max(0.45, radius * 0.2);
-      glass.beginPath();
-      glass.moveTo(x - radius * 0.32, drop.y - radius * 0.48);
-      glass.quadraticCurveTo(x - radius * 0.1, drop.y - radius * 0.68, x + radius * 0.08, drop.y - radius * 0.64);
-      glass.stroke();
-      glass.restore();
-    }
+  function spawnScan(x, y, now) {
+    scans.push({
+      x,
+      y,
+      startedAt: now,
+      seed: randomInt(65536),
+      readings: [random(0.42, 0.91), random(0.18, 0.84)],
+      xPercent: Math.round(x / width * 100),
+      yPercent: Math.round(y / height * 100),
+      glyphs: Array.from({ length: 30 }, () => ({
+        x: random(-88, 88),
+        y: random(-62, 62),
+        code: randomInt(16),
+      })),
+    });
   }
 
   function drawField(now) {
@@ -166,22 +124,12 @@ import { BokehPass } from "./vendor/postprocessing/BokehPass.js";
     field.textBaseline = "middle";
     if (pointer && !scanTriggered && now - pointerMovedAt > 720) {
       scanTriggered = true;
-      const xPercent = Math.round(pointer.x / width * 100);
-      const yPercent = Math.round(pointer.y / height * 100);
-      scans.push({
-        x: pointer.x,
-        y: pointer.y,
-        startedAt: now,
-        seed: randomInt(65536),
-        readings: [random(0.42, 0.91), random(0.18, 0.84)],
-        xPercent,
-        yPercent,
-        glyphs: Array.from({ length: 30 }, () => ({
-          x: random(-88, 88),
-          y: random(-62, 62),
-          code: randomInt(16),
-        })),
-      });
+      spawnScan(pointer.x, pointer.y, now);
+    }
+    // Random autonomous scans drift across the field on their own.
+    if (!scanTriggered && scans.length < 2 && now > nextAutoScan) {
+      nextAutoScan = now + random(3600, 8500);
+      spawnScan(random(width * 0.14, width * 0.86), random(height * 0.14, height * 0.82), now);
     }
 
     scans = scans.filter(scan => (
@@ -296,8 +244,10 @@ import { BokehPass } from "./vendor/postprocessing/BokehPass.js";
   let pendingAssets = 0;
   let shadowFrozen = false;
   let qualityIndex = 0;
-  let bokehDisabled = false;
-  const PIXEL_STEPS = [2, 1.6, 1.3, 1.1, 1];
+  let directRender = true;
+  let glassDegraded = false;
+  let cloudSprites = [];
+  const PIXEL_STEPS = [1.5, 1.3, 1.1, 1, 0.85];
 
   function addWindSway(material) {
     const uniforms = { uWindTime: { value: 0 } };
@@ -485,18 +435,144 @@ import { BokehPass } from "./vendor/postprocessing/BokehPass.js";
     const neededHalfHeight = halfHeight * 1.18;
     const neededHalfWidth = halfHeight * aspect * 1.12;
     // The exported pane measures roughly 16 wide x 9 tall once upright.
-    const scale = Math.max(neededHalfHeight / 4.5, neededHalfWidth / 8.0) * 1.15;
+    const scale = Math.max(neededHalfHeight / 4.5, neededHalfWidth / 8.0) * 0.62;
     windowMesh.scale.setScalar(scale);
-    windowMesh.position.y = camera.position.y - 0.55;
+    // Park the pane in the lower third of the frame along the camera's view
+    // direction, so the high camera still sees the sweeping field above it.
+    const dir = new THREE.Vector3();
+    camera.getWorldDirection(dir);
+    const centerY = camera.position.y + dir.y * distance;
+    windowMesh.position.y = centerY - halfHeight * 0.42;
+  }
+
+  // Slow-drifting cloud sprites high in the sky — cheap atmospheric depth.
+  let cloudTexture = null;
+  function getCloudTexture() {
+    if (cloudTexture) return cloudTexture;
+    const canvas = document.createElement("canvas");
+    canvas.width = 256;
+    canvas.height = 128;
+    const ctx = canvas.getContext("2d");
+    for (let i = 0; i < 16; i++) {
+      const cx = 30 + Math.random() * 196;
+      const cy = 40 + Math.random() * 48;
+      const r = 18 + Math.random() * 42;
+      const gradient = ctx.createRadialGradient(cx, cy, 2, cx, cy, r);
+      gradient.addColorStop(0, "rgba(165,180,200,0.16)");
+      gradient.addColorStop(1, "rgba(165,180,200,0)");
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, 256, 128);
+    }
+    cloudTexture = new THREE.CanvasTexture(canvas);
+    return cloudTexture;
+  }
+
+  function createClouds() {
+    const map = getCloudTexture();
+    for (let i = 0; i < 10; i++) {
+      const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+        map,
+        color: 0x141c26,
+        transparent: true,
+        opacity: random(0.1, 0.2),
+        depthWrite: false,
+        fog: false,
+      }));
+      sprite.position.set(random(-380, 380), random(42, 85), random(-520, -220));
+      sprite.scale.set(random(90, 170), random(28, 48), 1);
+      scene.add(sprite);
+      cloudSprites.push({ sprite, speed: random(0.4, 1.1) });
+    }
+  }
+
+  function updateClouds(delta) {
+    for (const cloud of cloudSprites) {
+      cloud.sprite.position.x += cloud.speed * delta;
+      if (cloud.sprite.position.x > 430) cloud.sprite.position.x = -430;
+    }
+  }
+
+  // Drifting spores/motes hanging in the air — one Points draw call,
+  // adds a lot of perceived detail for almost no GPU cost.
+  let sporeGeometry = null;
+  let sporeData = null;
+  function createSpores() {
+    const COUNT = 380;
+    const positions = new Float32Array(COUNT * 3);
+    sporeData = Array.from({ length: COUNT }, () => ({
+      x: random(-36, 36),
+      y: random(0.2, 13),
+      z: random(-115, -5),
+      speed: random(0.05, 0.22),
+      phase: random(0, Math.PI * 2),
+      sway: random(0.2, 0.7),
+    }));
+    for (let i = 0; i < COUNT; i++) {
+      positions[i * 3] = sporeData[i].x;
+      positions[i * 3 + 1] = sporeData[i].y;
+      positions[i * 3 + 2] = sporeData[i].z;
+    }
+    sporeGeometry = new THREE.BufferGeometry();
+    sporeGeometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    const points = new THREE.Points(sporeGeometry, new THREE.PointsMaterial({
+      color: 0xa8c8b0,
+      size: 0.055,
+      transparent: true,
+      opacity: 0.55,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      sizeAttenuation: true,
+    }));
+    points.frustumCulled = false;
+    scene.add(points);
+  }
+
+  function updateSpores(delta, seconds) {
+    if (!sporeGeometry) return;
+    const positions = sporeGeometry.attributes.position.array;
+    for (let i = 0; i < sporeData.length; i++) {
+      const spore = sporeData[i];
+      spore.y += spore.speed * delta;
+      spore.x += Math.sin(seconds * 0.6 + spore.phase) * spore.sway * delta;
+      if (spore.y > 14) {
+        spore.y = random(0.2, 1);
+        spore.x = random(-36, 36);
+        spore.z = random(-115, -5);
+      }
+      if (spore.x > 38) spore.x = -38;
+      if (spore.x < -38) spore.x = 38;
+      positions[i * 3] = spore.x;
+      positions[i * 3 + 1] = spore.y;
+      positions[i * 3 + 2] = spore.z;
+    }
+    sporeGeometry.attributes.position.needsUpdate = true;
+  }
+
+  // Last-resort degradation: transmission forces a second full scene render
+  // every frame, so on very weak GPUs swap it for plain transparency.
+  function degradeGlass() {
+    scene.traverse(object => {
+      if (!object.isMesh || !object.material) return;
+      const materials = Array.isArray(object.material) ? object.material : [object.material];
+      for (const material of materials) {
+        if (material.transmission > 0) {
+          material.transmission = 0;
+          material.transparent = true;
+          material.opacity = Math.min(material.opacity || 1, 0.4);
+          material.depthWrite = false;
+          material.needsUpdate = true;
+        }
+      }
+    });
   }
 
   function createRain() {
-    const COUNT = 900;
+    const COUNT = 1300;
     const positions = new Float32Array(COUNT * 2 * 3);
     rainDrops = Array.from({ length: COUNT }, () => ({
-      x: random(-34, 34),
+      x: random(-55, 55),
       y: random(0, 16),
-      z: random(-115, -6),
+      z: random(-320, -6),
       speed: random(9, 16),
       drift: random(-0.6, 0.4),
       length: random(0.35, 0.8),
@@ -530,11 +606,11 @@ import { BokehPass } from "./vendor/postprocessing/BokehPass.js";
         drop.z += windZ * delta;
         if (drop.y < -1) {
           drop.y = random(14, 18);
-          drop.x = random(-34, 34);
-          drop.z = random(-115, -6);
+          drop.x = random(-55, 55);
+          drop.z = random(-320, -6);
         }
-        if (drop.x > 36) drop.x = -36;
-        if (drop.x < -36) drop.x = 36;
+        if (drop.x > 57) drop.x = -57;
+        if (drop.x < -57) drop.x = 57;
       }
       const j = i * 6;
       positions.array[j] = drop.x;
@@ -610,7 +686,7 @@ import { BokehPass } from "./vendor/postprocessing/BokehPass.js";
     applyPixelRatio();
     camera.aspect = aspect;
     camera.updateProjectionMatrix();
-    camera.lookAt(parallax.x * 0.17, 1.1 + parallax.y * 0.12, -12);
+    camera.lookAt(parallax.x * 0.2, 2.5 + parallax.y * 0.15, -45);
     layoutWindow();
     for (const bill of bills) {
       const halfHeight = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * (camera.position.z - bill.mesh.position.z);
@@ -636,12 +712,12 @@ import { BokehPass } from "./vendor/postprocessing/BokehPass.js";
       scene = new THREE.Scene();
       scene.background = new THREE.Color(0x070b10);
       scene.fog = new THREE.FogExp2(0x101a22, 0.016);
-      camera = new THREE.PerspectiveCamera(42, 1, 0.1, 220);
-      camera.position.set(0, 1.85, 14);
-      camera.lookAt(0, 1.1, -12);
+      camera = new THREE.PerspectiveCamera(46, 1, 0.1, 300);
+      camera.position.set(0, 16, 24);
+      camera.lookAt(0, 2.5, -45);
 
-      scene.add(new THREE.HemisphereLight(0x33465c, 0x0a0f0c, 0.5));
-      const keyLight = new THREE.DirectionalLight(0x8fa8cc, 0.85);
+      scene.add(new THREE.HemisphereLight(0x33465c, 0x0a0f0c, 0.62));
+      const keyLight = new THREE.DirectionalLight(0x8fa8cc, 0.95);
       keyLight.position.set(-9, 18, 6);
       keyLight.target.position.set(0, 0, -30);
       keyLight.castShadow = true;
@@ -657,32 +733,21 @@ import { BokehPass } from "./vendor/postprocessing/BokehPass.js";
       const fillLight = new THREE.DirectionalLight(0x4a5f7d, 0.35);
       fillLight.position.set(8, 6, -6);
       scene.add(fillLight);
+      // Cool fill from behind the camera so the foreground ground isn't
+      // pitch black at night.
+      const frontFill = new THREE.DirectionalLight(0x39506e, 0.32);
+      frontFill.position.set(0, 12, 26);
+      frontFill.target.position.set(0, 0, -40);
+      scene.add(frontFill, frontFill.target);
 
-      // Endless ground plane: continues the field past the detailed terrain
-      // edge and dissolves into the night fog at the horizon.
-      const farGround = new THREE.Mesh(
-        new THREE.CircleGeometry(620, 72),
-        new THREE.MeshStandardMaterial({
-          color: 0x131a10,
-          roughness: 1,
-          metalness: 0,
-          envMapIntensity: 0.15,
-        })
-      );
-      farGround.rotation.x = -Math.PI / 2;
-      farGround.position.set(0, -0.72, -160);
-      farGround.receiveShadow = true;
-      scene.add(farGround);
-
+      createClouds();
       createRain();
+      createSpores();
 
+      // No post-processing: the DOF bokeh pass was too expensive on
+      // real-world GPUs. Fog + atmospheric perspective carry the depth.
       composer = new EffectComposer(renderer);
       composer.addPass(new RenderPass(scene, camera));
-      composer.addPass(new BokehPass(scene, camera, {
-        focus: 13.5,
-        aperture: 0.014,
-        maxblur: 0.0035,
-      }));
 
       resizeScene();
       window.__ciaoScene = { scene, camera, renderer, composer };
@@ -693,6 +758,62 @@ import { BokehPass } from "./vendor/postprocessing/BokehPass.js";
       console.error("[login-scene] Could not initialize the 3D scene.", error);
       return false;
     }
+  }
+
+  // Endless ground: a huge disc that continues the field past the detailed
+  // terrain in every direction. Gentle rolling noise keeps the horizon from
+  // looking CG-flat, the amplitude fades to zero inside the detailed
+  // terrain's footprint so there's no seam, and it reuses the terrain
+  // scan's soil texture so the ground reads as the same field.
+  function createFarGround() {
+    const size = 1800;
+    const segments = 110;
+    const geometry = new THREE.CircleGeometry(size / 2, segments);
+    const position = geometry.attributes.position;
+    // CircleGeometry lies in the XY plane; local +z becomes world +y after
+    // the -90 deg X rotation, and local (x, y) maps to world (x, -z).
+    // The detailed terrain occupies world |x|<=44, z in [-127,-9], which
+    // maps to local x in [-44,44], y in [-151,-33].
+    for (let i = 0; i < position.count; i++) {
+      const x = position.getX(i);
+      const y = position.getY(i);
+      const ex = Math.max(0, Math.abs(x) - 44);
+      const ey = Math.max(0, -151 - y) + Math.max(0, y + 33);
+      const d = Math.hypot(ex, ey);
+      const amp = Math.min(1, d / 45);
+      const smooth = amp * amp * (3 - 2 * amp);
+      const rolling =
+        0.55 * Math.sin(x * 0.02 + 1.3) * Math.cos(y * 0.016) +
+        1.1 * Math.sin(x * 0.006 + y * 0.009 + 2.1) * Math.cos(y * 0.012 - 1.0) +
+        0.35 * Math.sin(x * 0.05 + y * 0.03);
+      position.setZ(i, -0.72 + smooth * rolling);
+    }
+    geometry.computeVertexNormals();
+
+    let map = null;
+    if (terrainMesh) {
+      const material = Array.isArray(terrainMesh.material) ? terrainMesh.material[0] : terrainMesh.material;
+      if (material && material.map) {
+        map = material.map.clone();
+        map.wrapS = map.wrapT = THREE.RepeatWrapping;
+        map.repeat.set(90, 90);
+        map.needsUpdate = true;
+      }
+    }
+    const farGround = new THREE.Mesh(
+      geometry,
+      new THREE.MeshStandardMaterial({
+        map,
+        color: map ? 0x9aa48e : 0x131a10,
+        roughness: 1,
+        metalness: 0,
+        envMapIntensity: 0.15,
+      })
+    );
+    farGround.rotation.x = -Math.PI / 2;
+    farGround.position.set(0, 0, -160);
+    farGround.receiveShadow = true;
+    scene.add(farGround);
   }
 
   function loadSceneAssets() {
@@ -741,8 +862,8 @@ import { BokehPass } from "./vendor/postprocessing/BokehPass.js";
       return -0.72;
     }
     const TREES = [
-      { file: "trees/fir_tree_01/fir_tree_01.glb", count: 9, area: { x: [-46, 46], z: [-118, -32] }, scale: [0.7, 1.5] },
-      { file: "trees/island_tree_01/island_tree_01.glb", count: 12, area: { x: [-46, 46], z: [-116, -34] }, scale: [0.8, 1.7] },
+      { file: "trees/fir_tree_01/fir_tree_01.glb", count: 12, area: { x: [-46, 46], z: [-118, -32] }, scale: [0.7, 1.5] },
+      { file: "trees/island_tree_01/island_tree_01.glb", count: 16, area: { x: [-46, 46], z: [-116, -34] }, scale: [0.8, 1.7] },
     ];
 
     // Field-edge light poles receding into the night, alternating the two
@@ -838,9 +959,9 @@ import { BokehPass } from "./vendor/postprocessing/BokehPass.js";
 
     const FIELD_AREA = { x: [-30, 30], z: [-108, -24] };
     const SPECIES = [
-      { file: "grass-medium-02.glb", count: 22 },
-      { file: "grass-bermuda-01.glb", count: 40 },
-      { file: "nettle-plant.glb", count: 10 },
+      { file: "grass-medium-02.glb", count: 30 },
+      { file: "grass-bermuda-01.glb", count: 56 },
+      { file: "nettle-plant.glb", count: 14 },
     ];
 
     gltfLoader.load(ASSET_BASE + "farm-terrain.glb", gltf => {
@@ -861,6 +982,7 @@ import { BokehPass } from "./vendor/postprocessing/BokehPass.js";
         if (!terrainMesh) terrain.traverse(object => { if (object.isMesh && !terrainMesh) terrainMesh = object; });
         terrain.updateMatrixWorld(true);
         buildTerrainSampler(terrainMesh);
+        createFarGround();
         for (const species of SPECIES) {
           gltfLoader.load(ASSET_BASE + species.file, plant => {
             scatterSpecies(plant.scene, species.count, FIELD_AREA);
@@ -910,7 +1032,7 @@ import { BokehPass } from "./vendor/postprocessing/BokehPass.js";
             addBillFlutter(material);
           }
         });
-        const count = width < 640 ? 6 : 9;
+        const count = width < 640 ? 8 : 13;
         bills = Array.from({ length: count }, () => createBill()).filter(Boolean);
         resizeScene();
         assetsReady = true;
@@ -921,6 +1043,318 @@ import { BokehPass } from "./vendor/postprocessing/BokehPass.js";
         console.error("[login-scene] Could not load the credit note model.", error);
       }
     }, undefined, error => console.error("[login-scene] Could not load the credit note model.", error));
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  Flying banknotes (DOM layer used with the video backdrop)          */
+  /* ------------------------------------------------------------------ */
+
+  let banknotes = [];
+  let noteTextures = null;
+
+  function makeNoteTextures() {
+    const W = 440;
+    const H = 190;
+    const INK = "#1c6b3d";
+    const INK_DARK = "#0d4a29";
+    const INK_LIGHT = "#2f8f57";
+    const variants = [];
+
+    for (let v = 0; v < 3; v++) {
+      const canvas = document.createElement("canvas");
+      canvas.width = W;
+      canvas.height = H;
+      const ctx = canvas.getContext("2d");
+
+      const paper = ctx.createLinearGradient(0, 0, W, H);
+      paper.addColorStop(0, "#f2f7e8");
+      paper.addColorStop(0.4, "#e2eed4");
+      paper.addColorStop(0.75, "#d2dfc0");
+      paper.addColorStop(1, "#c2d2ae");
+      ctx.fillStyle = paper;
+      ctx.fillRect(0, 0, W, H);
+
+      // laid paper: faint horizontal chain lines + fibre speckle
+      ctx.strokeStyle = "rgba(110,135,95,0.08)";
+      ctx.lineWidth = 0.6;
+      for (let y = 4; y < H; y += 4) {
+        ctx.beginPath();
+        ctx.moveTo(0, y + Math.sin(y * 0.7) * 0.4);
+        ctx.lineTo(W, y);
+        ctx.stroke();
+      }
+      ctx.fillStyle = "rgba(120,140,100,0.10)";
+      for (let i = 0; i < 700; i++) {
+        ctx.fillRect(Math.random() * W, Math.random() * H, 1.3, 0.7);
+      }
+      // aged edge darkening
+      const vign = ctx.createRadialGradient(W / 2, H / 2, H * 0.35, W / 2, H / 2, W * 0.62);
+      vign.addColorStop(0, "rgba(0,0,0,0)");
+      vign.addColorStop(1, "rgba(60,80,45,0.16)");
+      ctx.fillStyle = vign;
+      ctx.fillRect(0, 0, W, H);
+
+      const serialA = `L${(10000000 + v * 7919 + Math.floor(Math.random() * 89999999))}`;
+      const serialB = `${String.fromCharCode(65 + v)}${Math.floor(10000000 + Math.random() * 89999999)}`;
+
+      // watermark: oversized faint denomination
+      ctx.save();
+      ctx.globalAlpha = 0.07;
+      ctx.fillStyle = INK_DARK;
+      ctx.font = "700 120px Georgia, serif";
+      ctx.textAlign = "center";
+      ctx.fillText("100", W * 0.68, H * 0.78);
+      ctx.restore();
+
+      // frame: outer + inner hairlines with corner rosettes
+      ctx.strokeStyle = INK;
+      ctx.lineWidth = 3;
+      ctx.strokeRect(4, 4, W - 8, H - 8);
+      ctx.lineWidth = 1;
+      ctx.strokeRect(11, 11, W - 22, H - 22);
+      ctx.strokeStyle = INK_LIGHT;
+      ctx.lineWidth = 0.8;
+      ctx.strokeRect(15, 15, W - 30, H - 30);
+      // corner flourishes
+      ctx.strokeStyle = INK;
+      for (const [cx, cy, sx, sy] of [[18, 18, 1, 1], [W - 18, 18, -1, 1], [18, H - 18, 1, -1], [W - 18, H - 18, -1, -1]]) {
+        ctx.beginPath();
+        ctx.arc(cx + 14 * sx, cy + 10 * sy, 9, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(cx + 22 * sx, cy + 18 * sy, 5, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+
+      // guilloche rosette behind portrait
+      const gx = W * 0.30;
+      const gy = H * 0.5;
+      ctx.save();
+      ctx.strokeStyle = "rgba(31,143,87,0.30)";
+      ctx.lineWidth = 0.7;
+      for (let ring = 0; ring < 14; ring++) {
+        ctx.beginPath();
+        const baseR = 16 + ring * 4.4;
+        for (let a = 0; a <= Math.PI * 2 + 0.05; a += 0.08) {
+          const r = baseR + Math.sin(a * 9 + ring * 1.3) * 2.6;
+          const px = gx + Math.cos(a) * r;
+          const py = gy + Math.sin(a) * r * 0.82;
+          if (a === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+        }
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      // portrait oval: engraved bust of Franklin
+      const px = gx, py = gy;
+      ctx.save();
+      ctx.beginPath();
+      ctx.ellipse(px, py, 30, 42, 0, 0, Math.PI * 2);
+      ctx.clip();
+      const bust = ctx.createLinearGradient(px - 30, py, px + 30, py);
+      bust.addColorStop(0, "#0d4a29");
+      bust.addColorStop(1, "#1c6b3d");
+      ctx.fillStyle = bust;
+      ctx.fillRect(px - 32, py - 44, 64, 88);
+      // head
+      ctx.fillStyle = "#0d4a29";
+      ctx.beginPath();
+      ctx.ellipse(px, py - 14, 12.5, 15.5, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // shoulders / coat
+      ctx.beginPath();
+      ctx.moveTo(px - 24, py + 44);
+      ctx.quadraticCurveTo(px - 22, py + 6, px - 9, py + 1);
+      ctx.lineTo(px + 9, py + 1);
+      ctx.quadraticCurveTo(px + 22, py + 6, px + 24, py + 44);
+      ctx.closePath();
+      ctx.fill();
+      // engraving hatch lines
+      ctx.strokeStyle = "rgba(200,230,205,0.5)";
+      ctx.lineWidth = 0.6;
+      for (let i = -28; i <= 28; i += 3.5) {
+        ctx.beginPath();
+        ctx.moveTo(px + i, py - 38);
+        ctx.lineTo(px + i + 10, py + 42);
+        ctx.stroke();
+      }
+      ctx.restore();
+      // oval frame
+      ctx.strokeStyle = INK_DARK;
+      ctx.lineWidth = 2.4;
+      ctx.beginPath();
+      ctx.ellipse(px, py, 30, 42, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.lineWidth = 0.8;
+      ctx.beginPath();
+      ctx.ellipse(px, py, 34, 46, 0, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // name under portrait
+      ctx.textAlign = "center";
+      ctx.fillStyle = INK_DARK;
+      ctx.font = "700 11px Georgia, 'Times New Roman', serif";
+      ctx.fillText("BENJAMIN FRANKLIN", px, py + 56);
+
+      // left seal: Treasury-style star seal
+      const sx = W * 0.115;
+      const sy = H * 0.42;
+      ctx.strokeStyle = INK_DARK;
+      ctx.fillStyle = "rgba(28,107,61,0.12)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(sx, sy, 17, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(sx, sy, 13.5, 0, Math.PI * 2);
+      ctx.lineWidth = 0.8;
+      ctx.stroke();
+      // radial spokes + star
+      ctx.lineWidth = 0.7;
+      for (let i = 0; i < 12; i++) {
+        const a = (i / 12) * Math.PI * 2;
+        ctx.beginPath();
+        ctx.moveTo(sx + Math.cos(a) * 4, sy + Math.sin(a) * 4);
+        ctx.lineTo(sx + Math.cos(a) * 12.5, sy + Math.sin(a) * 12.5);
+        ctx.stroke();
+      }
+      ctx.fillStyle = INK_DARK;
+      ctx.beginPath();
+      for (let i = 0; i < 5; i++) {
+        const a = -Math.PI / 2 + (i * 4 * Math.PI) / 5;
+        const x = sx + Math.cos(a) * 6.5;
+        const y = sy + Math.sin(a) * 6.5;
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.font = "8px ui-monospace, monospace";
+      ctx.fillText("TREASURY", sx, sy + 24);
+
+      // right seal: Federal Reserve letter
+      const rx = W * 0.885;
+      const ry = H * 0.42;
+      ctx.strokeStyle = INK_DARK;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(rx, ry, 17, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(rx, ry, 13.5, 0, Math.PI * 2);
+      ctx.lineWidth = 0.8;
+      ctx.stroke();
+      ctx.font = "700 19px Georgia, serif";
+      ctx.fillStyle = INK_DARK;
+      ctx.fillText("B", rx, ry + 7);
+      ctx.font = "8px ui-monospace, monospace";
+      ctx.fillText("FEDERAL RESERVE", rx, ry + 24);
+
+      // security thread: translucent strip with microtext
+      const threadX = W * 0.80;
+      ctx.save();
+      ctx.globalAlpha = 0.55;
+      ctx.fillStyle = "#bcd8c4";
+      ctx.fillRect(threadX - 7, 20, 14, H - 40);
+      ctx.strokeStyle = INK_LIGHT;
+      ctx.lineWidth = 0.8;
+      ctx.strokeRect(threadX - 7, 20, 14, H - 40);
+      ctx.translate(threadX, H / 2);
+      ctx.rotate(-Math.PI / 2);
+      ctx.fillStyle = INK_DARK;
+      ctx.font = "7px ui-monospace, monospace";
+      ctx.textAlign = "center";
+      for (let i = -3; i <= 3; i++) ctx.fillText("USA 100 ", i * 46, 0);
+      ctx.restore();
+
+      // microprint along the inner border
+      ctx.fillStyle = "rgba(13,74,41,0.5)";
+      ctx.font = "4.5px ui-monospace, monospace";
+      ctx.textAlign = "left";
+      for (let x = 24; x < W - 30; x += 78) ctx.fillText("THE UNITED STATES OF AMERICA ", x, 23.5);
+      for (let x = 24; x < W - 30; x += 78) ctx.fillText("ONE HUNDRED DOLLARS ", x, H - 18.5);
+
+      // top inscription
+      ctx.font = "700 12.5px Georgia, 'Times New Roman', serif";
+      ctx.fillStyle = INK_DARK;
+      ctx.fillText("THE UNITED STATES OF AMERICA", W / 2, 36);
+      ctx.font = "9.5px Georgia, serif";
+      ctx.fillStyle = INK;
+      ctx.fillText("ONE HUNDRED DOLLARS", W / 2, H - 42);
+
+      // serial numbers
+      ctx.font = "700 11px ui-monospace, monospace";
+      ctx.fillStyle = INK_DARK;
+      ctx.fillText(serialA, 32, 26);
+      ctx.fillText(serialB, W - 32, 26);
+      ctx.fillText(serialB, 32, H - 16);
+      ctx.fillText(serialA, W - 32, H - 16);
+
+      // denomination numerals in corners
+      ctx.font = "700 16px Georgia, serif";
+      ctx.fillText("100", 24, 48);
+      ctx.fillText("100", W - 24, 48);
+      ctx.fillText("100", 24, H - 26);
+      ctx.fillText("100", W - 24, H - 26);
+      // small stars flanking header
+      ctx.font = "11px Georgia, serif";
+      ctx.fillText("✦", W / 2 - 168, 36);
+      ctx.fillText("✦", W / 2 + 168, 36);
+
+      variants.push(canvas.toDataURL("image/png"));
+    }
+    return variants;
+  }
+
+  function createBanknotes() {
+    if (!noteTextures) noteTextures = makeNoteTextures();
+    const count = Math.max(10, Math.min(18, Math.round((width || 1280) / 95)));
+    for (let i = 0; i < count; i++) {
+      const el = document.createElement("div");
+      el.className = "fly-note";
+      el.style.backgroundImage = `url(${noteTextures[i % noteTextures.length]})`;
+      const depth = random(0.25, 1);
+      el.style.filter = `hue-rotate(${random(-8, 8)}deg) brightness(${random(0.82, 1.08)}) blur(${((1 - depth) * 1.4).toFixed(2)}px) drop-shadow(0 ${6 + depth * 8}px ${10 + depth * 12}px rgba(0,0,0,${(0.25 + depth * 0.25).toFixed(2)}))`;
+      shell.appendChild(el);
+      banknotes.push({
+        el,
+        x: random(-80, (width || 1280) + 80),
+        y: random(-(height || 800) * 0.9, (height || 800) * 0.4),
+        vx: random(-28, 28),
+        vy: random(50, 120),
+        terminal: random(150, 260),
+        phase: random(0, Math.PI * 2),
+        rotBase: random(-0.5, 0.5),
+        spin: random(-0.7, 0.7),
+        depth,
+        scale: 0.55 + depth * 0.65,
+      });
+    }
+  }
+
+  function updateBanknotes(delta, seconds) {
+    for (const note of banknotes) {
+      note.vy = Math.min(note.terminal, note.vy + 320 * delta);
+      note.y += note.vy * delta * (0.7 + note.depth * 0.6);
+      note.x += (note.vx + Math.sin(seconds * 1.2 + note.phase) * 26) * delta * (0.7 + note.depth * 0.6);
+      note.rotBase += note.spin * delta;
+      if (note.y > (height || 800) + 90) {
+        note.y = random(-140, -30);
+        note.x = random(-80, (width || 1280) + 80);
+        note.vy = random(40, 110);
+      }
+      if (note.x > (width || 1280) + 120) note.x = -120;
+      if (note.x < -140) note.x = (width || 1280) + 100;
+      const flutter = Math.sin(seconds * (1.9 + note.depth) + note.phase);
+      const flex = Math.sin(seconds * 2.7 + note.phase * 2.1);
+      const rot = note.rotBase + flutter * 0.38;
+      const skew = flex * 0.14;
+      const squash = 1 + flex * 0.05;
+      note.el.style.transform =
+        `translate3d(${note.x.toFixed(1)}px, ${note.y.toFixed(1)}px, 0) ` +
+        `rotate(${rot.toFixed(3)}rad) skewY(${skew.toFixed(3)}rad) ` +
+        `scale(${note.scale.toFixed(3)}, ${(note.scale * squash).toFixed(3)})`;
+    }
   }
 
   function animate(now) {
@@ -937,12 +1371,17 @@ import { BokehPass } from "./vendor/postprocessing/BokehPass.js";
     }
     drawGlass(now, delta);
     drawField(now);
-    if (!reducedMotion) updateRain(delta);
+    if (!reducedMotion) {
+      updateRain(delta);
+      updateClouds(delta);
+      updateSpores(delta, seconds);
+      updateBanknotes(delta, seconds);
+    }
     if (renderer && scene && camera) {
       if (!reducedMotion) {
-        camera.position.x = parallax.x * 0.55;
-        camera.position.y = 1.85 - parallax.y * 0.38;
-        camera.lookAt(parallax.x * 0.15, 1.1 - parallax.y * 0.1, -12);
+        camera.position.x = parallax.x * 0.7;
+        camera.position.y = 16 - parallax.y * 0.6;
+        camera.lookAt(parallax.x * 0.2, 2.5 - parallax.y * 0.15, -45);
       }
       if (!reducedMotion) {
         for (const bill of bills) {
@@ -967,12 +1406,13 @@ import { BokehPass } from "./vendor/postprocessing/BokehPass.js";
           }
         }
       }
-      if (composer) composer.render();
+      if (composer && !directRender) composer.render();
       else renderer.render(scene, camera);
 
       // Adaptive resolution: step the pixel ratio down when the GPU can't
       // hold ~45 fps, back up when it has headroom. 2 s windows keep it
-      // from oscillating.
+      // from oscillating. If resolution alone isn't enough, shed post
+      // processing and finally the glass transmission pass.
       animate.fpsFrames = (animate.fpsFrames || 0) + 1;
       animate.fpsWindow = (animate.fpsWindow || 0) + delta;
       if (animate.fpsWindow >= 2) {
@@ -985,11 +1425,9 @@ import { BokehPass } from "./vendor/postprocessing/BokehPass.js";
         } else if (fps > 57 && qualityIndex > 0) {
           qualityIndex -= 1;
           applyPixelRatio();
-        } else if (fps < 30 && qualityIndex === PIXEL_STEPS.length - 1 && !bokehDisabled && composer) {
-          // Last resort on very weak GPUs: drop the DOF pass entirely.
-          // The fog + atmospheric perspective still carry the depth.
-          bokehDisabled = true;
-          composer.passes = composer.passes.filter(pass => !(pass instanceof BokehPass));
+        } else if (fps < 30 && qualityIndex === PIXEL_STEPS.length - 1 && !glassDegraded) {
+          glassDegraded = true;
+          degradeGlass();
         }
       }
 
@@ -1038,7 +1476,8 @@ import { BokehPass } from "./vendor/postprocessing/BokehPass.js";
     resizeObserver.observe(shell);
   }
   window.addEventListener("resize", resizeField, { passive: true });
-  initializeThreeScene();
+  if (!useVideoBg) initializeThreeScene();
+  else createBanknotes();
   const visibilityObserver = new MutationObserver(() => {
     if (authShellHidden()) {
       stopAnimation();
@@ -1079,7 +1518,6 @@ import { BokehPass } from "./vendor/postprocessing/BokehPass.js";
     }
     field.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
     glass.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-    createRaindrops();
     if (renderer) {
       resizeScene();
       if (reducedMotionQuery.matches || document.body.classList.contains("reduced-motion")) {

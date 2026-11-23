@@ -78,7 +78,10 @@ async def static_file(request):
     rel = os.path.normpath(tail).replace("\\", "/").lstrip("/")
     if not rel or rel.startswith("..") or os.path.isabs(rel):
         raise web.HTTPNotFound()
-    return web.FileResponse(os.path.join(STATIC_DIR, rel))
+    path = os.path.join(STATIC_DIR, rel)
+    if not os.path.isfile(path):
+        raise web.HTTPNotFound()
+    return web.FileResponse(path)
 
 async def emoji_file(request):
     name = request.match_info["name"]
@@ -374,7 +377,11 @@ def main():
     app.router.add_delete("/api/groups/{group_id}/members/invites/{user_id}", member_invites_resource)
     app.router.add_patch("/api/groups/{group_id}/members/{user_id}/roles", member_roles_resource)
     app.router.add_delete("/api/groups/{group_id}/members/{user_id}", member_roles_resource)
-    web.run_app(app, host="127.0.0.1", port=8080)
+    web.run_app(
+        app,
+        host=os.environ.get("PYCHAT_HTTP_HOST", "127.0.0.1"),
+        port=int(os.environ.get("PYCHAT_HTTP_PORT") or os.environ.get("PORT") or "8080"),
+    )
 
 
 if __name__ == "__main__":

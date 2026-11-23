@@ -1,4 +1,5 @@
-const WS_URL = (window.location.protocol === "https:" ? "wss:" : "ws:") + "//" + window.location.host + "/ws";
+const WS_URL = (window.CIAOCHAT_CONFIG && window.CIAOCHAT_CONFIG.wsUrl) ||
+  ((window.location.protocol === "https:" ? "wss:" : "ws:") + "//" + window.location.host + "/ws");
 
 const el = id => document.getElementById(id);
 const authShell = el("authShell");
