@@ -1,22 +1,27 @@
+import * as THREE from "./vendor/three.module.js";
+import { GLTFLoader } from "./vendor/loaders/GLTFLoader.js";
+import { RGBELoader } from "./vendor/loaders/RGBELoader.js";
+import { EffectComposer } from "./vendor/postprocessing/EffectComposer.js";
+import { RenderPass } from "./vendor/postprocessing/RenderPass.js";
+import { BokehPass } from "./vendor/postprocessing/BokehPass.js";
+
 (() => {
   const shell = document.getElementById("authShell");
   const sceneCanvas = document.getElementById("loginScene");
   const fieldCanvas = document.getElementById("asciiField");
-  const farmCanvas = document.getElementById("farmScene");
   const glassCanvas = document.getElementById("glassPane");
   const sceneTelemetry = document.getElementById("sceneTelemetry");
   const fieldStatus = document.getElementById("fieldStatus");
-  if (!shell || !sceneCanvas || !fieldCanvas || !farmCanvas || !glassCanvas) return;
+  if (!shell || !sceneCanvas || !fieldCanvas || !glassCanvas) return;
 
   const field = fieldCanvas.getContext("2d");
-  const farm = farmCanvas.getContext("2d");
   const glass = glassCanvas.getContext("2d");
   if (!field) {
     console.error("[login-scene] Could not initialize the ASCII field canvas.");
     return;
   }
-  if (!farm || !glass) {
-    console.error("[login-scene] Could not initialize the farm or glass canvas.");
+  if (!glass) {
+    console.error("[login-scene] Could not initialize the glass canvas.");
     return;
   }
 
@@ -31,20 +36,18 @@
   let pointerMovedAt = 0;
   let scanTriggered = false;
   let scans = [];
-  let farmPlants = [];
-  let farmTexture = null;
   let raindrops = [];
   let frame = 0;
   let running = false;
   let resizeObserver = null;
-  let lastFarmDraw = 0;
   let lastGlassDraw = 0;
-  let cropShaderUniforms = null;
-  let glassShaderUniforms = null;
+  let assetsReady = false;
 
   const random = (min, max) => min + Math.random() * (max - min);
   const randomInt = max => Math.floor(Math.random() * max);
   const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+
+  const ASSET_BASE = "/static/assets/field-survey/";
 
   function setSceneTelemetry(text) {
     if (sceneTelemetry && sceneTelemetry.textContent !== text) sceneTelemetry.textContent = text;
@@ -56,186 +59,6 @@
       if (exceptPoint && Math.hypot(scan.x - exceptPoint.x, scan.y - exceptPoint.y) < 112) continue;
       scan.fadeAt ??= now;
     }
-  }
-
-  function createEnvironmentMap() {
-    const canvas = document.createElement("canvas");
-    canvas.width = 512;
-    canvas.height = 256;
-    const context = canvas.getContext("2d");
-    const sky = context.createLinearGradient(0, 0, 0, canvas.height);
-    sky.addColorStop(0, "#8c9d91");
-    sky.addColorStop(0.42, "#c2c7af");
-    sky.addColorStop(0.5, "#a9ac8c");
-    sky.addColorStop(0.58, "#617354");
-    sky.addColorStop(1, "#18291d");
-    context.fillStyle = sky;
-    context.fillRect(0, 0, canvas.width, canvas.height);
-
-    const sun = context.createRadialGradient(356, 80, 2, 356, 80, 82);
-    sun.addColorStop(0, "rgba(255, 247, 215, 0.9)");
-    sun.addColorStop(0.12, "rgba(250, 241, 209, 0.42)");
-    sun.addColorStop(1, "rgba(250, 241, 209, 0)");
-    context.fillStyle = sun;
-    context.fillRect(270, 0, 172, 164);
-
-    for (const [x, y, w, h, opacity] of [
-      [54, 42, 34, 88, 0.2],
-      [196, 24, 21, 112, 0.13],
-      [446, 34, 29, 96, 0.17],
-    ]) {
-      const softbox = context.createLinearGradient(x, y, x + w, y + h);
-      softbox.addColorStop(0, "rgba(249, 253, 245, 0)");
-      softbox.addColorStop(0.5, `rgba(249, 253, 245, ${opacity})`);
-      softbox.addColorStop(1, "rgba(249, 253, 245, 0)");
-      context.fillStyle = softbox;
-      context.fillRect(x - 12, y - 6, w + 24, h + 12);
-    }
-
-    const texture = new THREE.CanvasTexture(canvas);
-    texture.mapping = THREE.EquirectangularReflectionMapping;
-    texture.encoding = THREE.sRGBEncoding;
-    texture.needsUpdate = true;
-    return texture;
-  }
-
-  function addPaperShader(material, seed) {
-    const uniforms = { uPaperSeed: { value: seed } };
-    material.onBeforeCompile = shader => {
-      shader.uniforms.uPaperSeed = uniforms.uPaperSeed;
-      shader.vertexShader = shader.vertexShader
-        .replace("#include <common>", "#include <common>\nvarying vec2 vCiaoPaperUv;")
-        .replace("#include <uv_vertex>", "#include <uv_vertex>\nvCiaoPaperUv = uv;");
-      shader.fragmentShader = shader.fragmentShader
-        .replace(
-          "#include <common>",
-          `#include <common>
-          varying vec2 vCiaoPaperUv;
-          uniform float uPaperSeed;
-          float ciaoPaperHash(vec2 p) {
-            return fract(sin(dot(p, vec2(127.1, 311.7)) + uPaperSeed * 74.7) * 43758.5453);
-          }`
-        )
-        .replace(
-          "#include <color_fragment>",
-          `#include <color_fragment>
-          float ciaoPaperGrain = ciaoPaperHash(floor(vCiaoPaperUv * vec2(1200.0, 850.0)));
-          float ciaoPaperFiber = sin(vCiaoPaperUv.x * 1850.0 + sin(vCiaoPaperUv.y * 410.0 + uPaperSeed) * 1.6);
-          diffuseColor.rgb *= 1.0 + (ciaoPaperGrain - 0.5) * 0.065 + ciaoPaperFiber * 0.009;`
-        )
-        .replace(
-          "#include <roughnessmap_fragment>",
-          `#include <roughnessmap_fragment>
-          roughnessFactor = clamp(roughnessFactor + ciaoPaperGrain * 0.035, 0.0, 1.0);`
-        );
-    };
-    material.customProgramCacheKey = () => "ciaochat-paper-fiber-v1";
-  }
-
-  function addGlassShader(material) {
-    const uniforms = { uCiaoGlassTime: { value: 0 } };
-    material.onBeforeCompile = shader => {
-      shader.uniforms.uCiaoGlassTime = uniforms.uCiaoGlassTime;
-      shader.vertexShader = shader.vertexShader
-        .replace(
-          "#include <common>",
-          "#include <common>\n#ifndef USE_UV\nattribute vec2 uv;\n#endif\nvarying vec2 vCiaoGlassUv;"
-        )
-        .replace("#include <uv_vertex>", "#include <uv_vertex>\nvCiaoGlassUv = uv;");
-      shader.fragmentShader = shader.fragmentShader
-        .replace(
-          "#include <common>",
-          `#include <common>
-          varying vec2 vCiaoGlassUv;
-          uniform float uCiaoGlassTime;
-          float ciaoGlassHash(vec2 p) {
-            return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
-          }
-          float ciaoGlassDrops(vec2 uv) {
-            vec2 grid = vec2(uv.x * 17.0, fract(uv.y + uCiaoGlassTime * 0.003) * 8.0);
-            vec2 cell = floor(grid);
-            vec2 dropLocal = fract(grid) - 0.5;
-            float seed = ciaoGlassHash(cell);
-            float radius = mix(0.075, 0.28, ciaoGlassHash(cell + 19.7));
-            dropLocal.x *= 0.78;
-            float drop = 1.0 - smoothstep(radius * 0.68, radius, length(dropLocal));
-            return drop * step(0.42, seed);
-          }`
-        )
-        .replace(
-          "#include <normal_fragment_begin>",
-          `#include <normal_fragment_begin>
-          float ciaoGlassDropNormal = ciaoGlassDrops(vCiaoGlassUv);
-          normal = normalize(normal + vec3(
-            sin(vCiaoGlassUv.x * 83.0 + uCiaoGlassTime) * ciaoGlassDropNormal * 0.025,
-            cos(vCiaoGlassUv.y * 57.0 - uCiaoGlassTime) * ciaoGlassDropNormal * 0.025,
-            0.0
-          ));`
-        )
-        .replace(
-          "#include <color_fragment>",
-          `#include <color_fragment>
-          float ciaoGlassDropColor = ciaoGlassDrops(vCiaoGlassUv);
-          diffuseColor.rgb += vec3(0.035, 0.05, 0.038) * ciaoGlassDropColor;`
-        )
-        .replace(
-          "#include <roughnessmap_fragment>",
-          `#include <roughnessmap_fragment>
-          roughnessFactor = mix(roughnessFactor, 0.025, ciaoGlassDrops(vCiaoGlassUv) * 0.88);`
-        );
-    };
-    material.customProgramCacheKey = () => "ciaochat-rain-glass-v1";
-    return uniforms;
-  }
-
-  function resizeField() {
-    const bounds = shell.getBoundingClientRect();
-    width = Math.max(1, bounds.width);
-    height = Math.max(1, bounds.height);
-    pixelRatio = Math.min(window.devicePixelRatio || 1, 1.4);
-    for (const canvas of [farmCanvas, sceneCanvas, glassCanvas, fieldCanvas]) {
-      canvas.width = Math.round(width * pixelRatio);
-      canvas.height = Math.round(height * pixelRatio);
-      canvas.style.width = `${width}px`;
-      canvas.style.height = `${height}px`;
-    }
-    field.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-    farm.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-    glass.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-    createFarmPlants();
-    createRaindrops();
-    if (renderer) {
-      resizeScene();
-      if (reducedMotionQuery.matches || document.body.classList.contains("reduced-motion")) {
-        updateCropLayer(0);
-        if (cropShaderUniforms) cropShaderUniforms.uCropTime.value = 0;
-        if (glassShaderUniforms) glassShaderUniforms.uCiaoGlassTime.value = 0;
-        renderer.render(scene, camera);
-      }
-    }
-    drawFarm(performance.now(), true);
-    drawGlass(performance.now(), 0, true);
-  }
-
-  function createFarmPlants() {
-    const count = Math.min(850, Math.round(width * height / 1450));
-    farmPlants = Array.from({ length: count }, () => ({
-      x: random(0, 1),
-      depth: random(0, 1),
-      height: random(0.55, 1.35),
-      phase: random(0, Math.PI * 2),
-      tone: randomInt(4),
-    }));
-    const textureCanvas = document.createElement("canvas");
-    textureCanvas.width = 256;
-    textureCanvas.height = 256;
-    const textureContext = textureCanvas.getContext("2d");
-    for (let i = 0; i < 5200; i++) {
-      const shade = randomInt(2) ? "210, 218, 172" : "22, 38, 21";
-      textureContext.fillStyle = `rgba(${shade}, ${random(0.025, 0.11)})`;
-      textureContext.fillRect(random(0, 256), random(0, 256), random(0.4, 1.8), random(0.4, 1.4));
-    }
-    farmTexture = farm.createPattern(textureCanvas, "repeat");
   }
 
   function createRaindrops() {
@@ -253,132 +76,6 @@
       phase: random(0, Math.PI * 2),
       focus: random(0, 1),
     }));
-  }
-
-  function drawFarm(now, force = false) {
-    if (!force && now - lastFarmDraw < 32) return;
-    lastFarmDraw = now;
-    const breeze = reducedMotionQuery.matches || document.body.classList.contains("reduced-motion") ? 0 : now * 0.001;
-    const horizon = height * 0.43;
-
-    farm.clearRect(0, 0, width, height);
-    const sky = farm.createLinearGradient(0, 0, 0, horizon * 1.15);
-    sky.addColorStop(0, "#526b70");
-    sky.addColorStop(0.52, "#94a895");
-    sky.addColorStop(1, "#c2c0a1");
-    farm.fillStyle = sky;
-    farm.fillRect(0, 0, width, horizon * 1.2);
-
-    const sun = farm.createRadialGradient(width * 0.72, horizon * 0.36, 2, width * 0.72, horizon * 0.36, width * 0.3);
-    sun.addColorStop(0, "rgba(241, 238, 205, 0.26)");
-    sun.addColorStop(1, "rgba(241, 238, 205, 0)");
-    farm.fillStyle = sun;
-    farm.fillRect(0, 0, width, horizon * 1.2);
-
-    farm.save();
-    farm.translate(parallax.x * 2.2, parallax.y * 1.1);
-    farm.filter = "blur(10px)";
-    for (let cloud = 0; cloud < 7; cloud++) {
-      const x = width * (0.08 + cloud * 0.16);
-      const y = horizon * (0.12 + (cloud % 3) * 0.11);
-      farm.fillStyle = "rgba(235, 239, 222, " + (0.025 + (cloud % 2) * 0.018) + ")";
-      farm.beginPath();
-      farm.ellipse(x, y, width * 0.095, horizon * 0.055, 0, 0, Math.PI * 2);
-      farm.fill();
-    }
-    farm.filter = "none";
-
-    for (let ridge = 0; ridge < 3; ridge++) {
-      const y = horizon * (0.77 + ridge * 0.095);
-      farm.beginPath();
-      farm.moveTo(0, y + horizon * 0.07);
-      farm.bezierCurveTo(width * 0.22, y - horizon * 0.17, width * 0.37, y + horizon * 0.13, width * 0.58, y - horizon * 0.015);
-      farm.bezierCurveTo(width * 0.76, y - horizon * 0.13, width * 0.88, y + horizon * 0.08, width, y - horizon * 0.055);
-      farm.lineTo(width, height);
-      farm.lineTo(0, height);
-      farm.closePath();
-      farm.fillStyle = ["#667d60", "#536e4b", "#435c3e"][ridge];
-      farm.fill();
-    }
-    farm.restore();
-
-    const field = farm.createLinearGradient(0, horizon, 0, height);
-    field.addColorStop(0, "#6e8053");
-    field.addColorStop(0.34, "#49613b");
-    field.addColorStop(1, "#172b1c");
-    farm.fillStyle = field;
-    farm.fillRect(0, horizon, width, height - horizon);
-    if (farmTexture) {
-      farm.globalAlpha = 0.34;
-      farm.fillStyle = farmTexture;
-      farm.fillRect(0, horizon, width, height - horizon);
-      farm.globalAlpha = 1;
-    }
-
-    farm.save();
-    farm.translate(parallax.x * 5, parallax.y * 2.5);
-    const vanishingX = width * (0.49 + parallax.x * 0.002);
-    const vanishingY = horizon * 1.04;
-    for (let row = -15; row <= 15; row++) {
-      const bottomX = vanishingX + row * width * 0.064;
-      farm.beginPath();
-      farm.moveTo(vanishingX + row * 1.2, vanishingY);
-      farm.bezierCurveTo(
-        vanishingX + row * width * 0.018,
-        horizon + (height - horizon) * 0.28,
-        bottomX - row * width * 0.02,
-        height * 0.79,
-        bottomX,
-        height + 12
-      );
-      farm.strokeStyle = row % 2
-        ? "rgba(177, 182, 121, 0.18)"
-        : "rgba(20, 42, 24, 0.2)";
-      farm.lineWidth = Math.max(1, width * 0.0012);
-      farm.stroke();
-    }
-
-    const haze = farm.createLinearGradient(0, horizon * 0.9, 0, horizon * 1.7);
-    haze.addColorStop(0, "rgba(212, 214, 188, 0.35)");
-    haze.addColorStop(1, "rgba(212, 214, 188, 0)");
-    farm.fillStyle = haze;
-    farm.fillRect(0, horizon * 0.9, width, horizon * 0.8);
-
-    for (const plant of farmPlants) {
-      const y = horizon + Math.pow(plant.depth, 1.65) * (height - horizon);
-      const depth = (y - horizon) / Math.max(1, height - horizon);
-      const x = plant.x * width + parallax.x * (2 + depth * 8);
-      const stemHeight = (4 + depth * 29) * plant.height;
-      const sway = Math.sin(breeze * 1.45 + plant.phase + depth * 3) * (1.5 + depth * 5);
-      const stemWidth = 0.7 + depth * 1.4;
-      const greens = ["#667b43", "#82914f", "#596f3d", "#9a9b59"];
-      farm.strokeStyle = greens[plant.tone];
-      farm.lineWidth = stemWidth;
-      farm.beginPath();
-      farm.moveTo(x, y);
-      farm.quadraticCurveTo(x + sway * 0.35, y - stemHeight * 0.56, x + sway, y - stemHeight);
-      farm.stroke();
-      farm.lineWidth = Math.max(0.55, stemWidth * 0.58);
-      for (const side of [-1, 1]) {
-        farm.beginPath();
-        farm.moveTo(x + sway * 0.45, y - stemHeight * 0.42);
-        farm.quadraticCurveTo(
-          x + side * stemHeight * 0.2 + sway,
-          y - stemHeight * 0.53,
-          x + side * stemHeight * 0.31 + sway,
-          y - stemHeight * 0.66
-        );
-        farm.stroke();
-      }
-    }
-    farm.restore();
-
-    const vignette = farm.createRadialGradient(width * 0.5, height * 0.52, height * 0.18, width * 0.5, height * 0.52, height * 0.88);
-    vignette.addColorStop(0, "rgba(8, 15, 10, 0)");
-    vignette.addColorStop(1, "rgba(5, 11, 7, 0.38)");
-    farm.fillStyle = vignette;
-    farm.fillRect(0, 0, width, height);
-    if (farmSceneTexture) farmSceneTexture.needsUpdate = true;
   }
 
   function drawGlass(now, delta, force = false) {
@@ -581,181 +278,305 @@
     setSceneTelemetry("FIELD / PASSIVE");
   });
 
+  /* ------------------------------------------------------------------ */
+  /*  Photorealistic 3D scene                                            */
+  /* ------------------------------------------------------------------ */
+
   let renderer = null;
+  let composer = null;
   let scene = null;
   let camera = null;
   let bills = [];
-  let cropMesh = null;
-  let cropInstances = [];
-  let cropDummy = null;
-  let viewHeight = 0;
-  let shadowMaterial = null;
-  let farmSceneTexture = null;
-  let farmPlane = null;
-  let glassMesh = null;
+  let noteTemplate = null;
+  let windowMesh = null;
+  let windUniforms = [];
+  let terrainMesh = null;
+  let rainLines = null;
+  let rainDrops = null;
+  let pendingAssets = 0;
+  let shadowFrozen = false;
+  let qualityIndex = 0;
+  let bokehDisabled = false;
+  const PIXEL_STEPS = [2, 1.6, 1.3, 1.1, 1];
 
-  function makeBillTexture(index) {
-    const canvas = document.createElement("canvas");
-    canvas.width = 768;
-    canvas.height = 432;
-    const ctx = canvas.getContext("2d");
-    const gradient = ctx.createLinearGradient(0, 0, 768, 432);
-    gradient.addColorStop(0, "#a9c49b");
-    gradient.addColorStop(0.45, "#799c6f");
-    gradient.addColorStop(1, "#526f4d");
-    ctx.fillStyle = gradient;
-    ctx.fillRect(0, 0, 768, 432);
-
-    const seeded = (n => () => {
-      n = (n * 1664525 + 1013904223) >>> 0;
-      return n / 4294967296;
-    })(index + 89);
-    for (let i = 0; i < 18000; i++) {
-      const shade = seeded() > 0.5 ? 255 : 0;
-      ctx.fillStyle = `rgba(${shade},${shade},${shade},${seeded() * 0.035})`;
-      ctx.fillRect(seeded() * 768, seeded() * 432, 1.4, 1.4);
-    }
-    for (let i = 0; i < 520; i++) {
-      const x = seeded() * 768;
-      const y = seeded() * 432;
-      ctx.beginPath();
-      ctx.moveTo(x, y);
-      ctx.quadraticCurveTo(x + seeded() * 5, y + seeded() * 3, x + seeded() * 11, y + seeded() * 5);
-      ctx.strokeStyle = seeded() > 0.5 ? "rgba(248, 255, 236, 0.16)" : "rgba(36, 68, 38, 0.12)";
-      ctx.lineWidth = 0.45 + seeded() * 0.45;
-      ctx.stroke();
-    }
-
-    ctx.strokeStyle = "rgba(231, 244, 220, 0.82)";
-    ctx.lineWidth = 3;
-    ctx.strokeRect(16, 16, 736, 400);
-    ctx.lineWidth = 1;
-    ctx.strokeStyle = "rgba(26, 57, 34, 0.74)";
-    ctx.strokeRect(25, 25, 718, 382);
-
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(34, 34, 700, 364);
-    ctx.clip();
-    for (let y = 40; y < 400; y += 6) {
-      ctx.beginPath();
-      for (let x = 35; x <= 733; x += 3) {
-        const wave = Math.sin((x + index * 73) * 0.034 + y * 0.018) * 6;
-        if (x === 35) ctx.moveTo(x, y + wave);
-        else ctx.lineTo(x, y + wave);
-      }
-      ctx.strokeStyle = `rgba(26, 59, 35, ${0.13 + (y % 4) * 0.025})`;
-      ctx.lineWidth = 1;
-      ctx.stroke();
-    }
-    ctx.restore();
-
-    for (const x of [104, 664]) {
-      ctx.beginPath();
-      ctx.ellipse(x, 216, 58, 112, 0, 0, Math.PI * 2);
-      ctx.strokeStyle = "rgba(31, 65, 38, 0.72)";
-      ctx.lineWidth = 2;
-      ctx.stroke();
-      for (let ring = 0; ring < 6; ring++) {
-        ctx.beginPath();
-        ctx.ellipse(x, 216, 35 + ring * 3.5, 76 + ring * 5, 0, 0, Math.PI * 2);
-        ctx.strokeStyle = `rgba(228, 242, 217, ${0.4 - ring * 0.035})`;
-        ctx.lineWidth = 1.2;
-        ctx.stroke();
-      }
-    }
-
-    ctx.strokeStyle = "rgba(28, 63, 37, 0.75)";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.ellipse(384, 218, 112, 132, 0, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.ellipse(384, 218, 101, 121, 0, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.fillStyle = "rgba(20, 50, 29, 0.22)";
-    ctx.beginPath();
-    ctx.ellipse(384, 218, 92, 112, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.fillStyle = "#183b25";
-    ctx.font = "700 22px Georgia, serif";
-    ctx.textAlign = "left";
-    ctx.fillText("CIAOCHAT", 50, 75);
-    ctx.font = "12px Georgia, serif";
-    ctx.fillText("DIGITAL COMMUNITY CREDIT", 50, 96);
-    ctx.textAlign = "right";
-    ctx.font = "700 21px Georgia, serif";
-    ctx.fillText("100", 718, 75);
-    ctx.font = "12px Georgia, serif";
-    ctx.fillText("SERIES 01", 718, 96);
-    ctx.textAlign = "center";
-    ctx.font = "700 102px Georgia, serif";
-    ctx.fillText("C", 384, 253);
-    ctx.font = "700 24px Georgia, serif";
-    ctx.fillText("ONE HUNDRED", 384, 310);
-    ctx.font = "10px ui-monospace, monospace";
-    ctx.fillText("C C C  010101  C C C  010101  C C C", 384, 340);
-    ctx.fillText("SERIES C  /  2026  /  CIAOCHAT EXCHANGE", 384, 366);
-    ctx.textAlign = "left";
-    for (let i = 0; i < 9; i++) {
-      const y = 126 + i * 18;
-      ctx.fillStyle = `rgba(25, 55, 33, ${0.42 + (i % 3) * 0.1})`;
-      ctx.fillRect(53, y, 116 + (i % 4) * 11, 1.3);
-      ctx.fillRect(598, y, 116 - (i % 4) * 9, 1.3);
-    }
-    ctx.fillStyle = "rgba(246, 255, 236, 0.22)";
-    ctx.fillRect(33, 34, 702, 4);
-
-    const texture = new THREE.CanvasTexture(canvas);
-    texture.encoding = THREE.sRGBEncoding;
-    texture.anisotropy = Math.min(4, renderer.capabilities.getMaxAnisotropy());
-    texture.needsUpdate = true;
-    return texture;
+  function addWindSway(material) {
+    const uniforms = { uWindTime: { value: 0 } };
+    windUniforms.push(uniforms);
+    material.onBeforeCompile = shader => {
+      shader.uniforms.uWindTime = uniforms.uWindTime;
+      shader.vertexShader = shader.vertexShader
+        .replace("#include <common>", "#include <common>\nuniform float uWindTime;")
+        .replace(
+          "#include <begin_vertex>",
+          `#include <begin_vertex>
+          #ifdef USE_INSTANCING
+            vec2 ciaoPhase = instanceMatrix[3].xz;
+          #else
+            vec2 ciaoPhase = vec2(0.0);
+          #endif
+          float ciaoSway = sin(uWindTime * 1.6 + ciaoPhase.x * 0.9 + ciaoPhase.y * 0.7 + position.y * 2.4);
+          float ciaoFlutter = cos(uWindTime * 2.3 + ciaoPhase.x * 1.7 - ciaoPhase.y * 1.3 + position.y * 3.1);
+          transformed.x += ciaoSway * 0.055 * position.y;
+          transformed.z += ciaoFlutter * 0.035 * position.y;`
+        );
+    };
+    material.customProgramCacheKey = () => "ciaochat-foliage-wind-v1";
+    material.needsUpdate = true;
   }
 
-  function createBill(index) {
-    const geometry = new THREE.PlaneGeometry(3.4, 1.92, 24, 12);
-    const position = geometry.attributes.position;
-    const basePositions = new Float32Array(position.array);
-    const material = new THREE.MeshPhysicalMaterial({
-      map: makeBillTexture(index),
-      roughness: 0.76,
-      metalness: 0.005,
-      transmission: 0.065,
-      thickness: 0.14,
-      clearcoat: 0.14,
-      clearcoatRoughness: 0.78,
-      envMapIntensity: 0.72,
-      side: THREE.DoubleSide,
+  function prepareFoliageMaterial(material) {
+    material.side = THREE.DoubleSide;
+    material.alphaTest = 0.38;
+    material.transparent = false;
+    material.depthWrite = true;
+    material.roughness = Math.min(material.roughness ?? 0.9, 0.9);
+    material.envMapIntensity = 0.22;
+    addWindSway(material);
+  }
+
+  function addBillFlutter(material) {
+    const uniforms = { uWindTime: { value: 0 } };
+    windUniforms.push(uniforms);
+    material.onBeforeCompile = shader => {
+      shader.uniforms.uWindTime = uniforms.uWindTime;
+      shader.vertexShader = shader.vertexShader
+        .replace("#include <common>", "#include <common>\nuniform float uWindTime;")
+        .replace(
+          "#include <begin_vertex>",
+          `#include <begin_vertex>
+          float ciaoBillEdge = clamp(abs(position.x) / 1.7, 0.0, 1.0) * 0.75
+                            + clamp(abs(position.z) / 1.0, 0.0, 1.0) * 0.25;
+          float ciaoBillRipple = sin(uWindTime * 2.3 + modelMatrix[3].x * 1.31 + modelMatrix[3].y * 1.73 + position.x * 1.9) * 0.62
+                               + sin(uWindTime * 3.9 + modelMatrix[3].z * 2.17 - position.z * 2.4) * 0.38;
+          transformed.y += ciaoBillRipple * 0.11 * ciaoBillEdge * ciaoBillEdge;`
+        );
+    };
+    material.customProgramCacheKey = () => "ciaochat-bill-flutter-v1";
+    material.needsUpdate = true;
+  }
+
+  function collectParts(root) {
+    root.updateMatrixWorld(true);
+    const parts = [];
+    root.traverse(object => {
+      if (!object.isMesh || !object.geometry) return;
+      const material = Array.isArray(object.material) ? object.material[0] : object.material;
+      if (!material) return;
+      parts.push({
+        geometry: object.geometry,
+        material,
+        matrix: object.matrixWorld.clone(),
+      });
     });
-    addPaperShader(material, index + 1);
-    const paper = new THREE.Mesh(geometry, material);
-    paper.position.z = 0.016;
-    paper.castShadow = true;
-    const shadow = new THREE.Mesh(new THREE.PlaneGeometry(3.9, 2.4), shadowMaterial);
-    shadow.position.set(0.06, -0.08, -0.022);
-    const edge = new THREE.Mesh(
-      new THREE.BoxGeometry(3.4, 1.92, 0.024),
-      new THREE.MeshStandardMaterial({ color: 0x3f5840, roughness: 0.94 })
+    return parts;
+  }
+
+  function scatterSpecies(root, count, area, groundFn = terrainHeightAt, scaleRange = [0.65, 1.7], wind = true, castShadows = true) {
+    const parts = collectParts(root);
+    if (!parts.length) return;
+    const materials = [...new Set(parts.map(part => part.material))];
+    for (const material of materials) {
+      if (wind) prepareFoliageMaterial(material);
+      else {
+        material.side = THREE.DoubleSide;
+        material.alphaTest = Math.max(material.alphaTest || 0, 0.38);
+        material.transparent = false;
+        material.depthWrite = true;
+        material.envMapIntensity = 0.3;
+      }
+    }
+    const dummy = new THREE.Object3D();
+    const instances = Array.from({ length: count }, () => ({
+      x: random(area.x[0], area.x[1]),
+      z: random(area.z[0], area.z[1]),
+      scale: random(scaleRange[0], scaleRange[1]),
+      rotation: random(0, Math.PI * 2),
+    }));
+    for (const part of parts) {
+      const instanced = new THREE.InstancedMesh(part.geometry, part.material, count);
+      instanced.castShadow = castShadows;
+      instanced.receiveShadow = true;
+      const rel = new THREE.Matrix4().copy(part.matrix);
+      for (let i = 0; i < count; i++) {
+        const spot = instances[i];
+        const groundY = groundFn(spot.x, spot.z);
+        dummy.position.set(spot.x, groundY - 0.03, spot.z);
+        dummy.rotation.set(0, spot.rotation, 0);
+        dummy.scale.setScalar(spot.scale);
+        dummy.updateMatrix();
+        dummy.matrix.multiply(rel);
+        instanced.setMatrixAt(i, dummy.matrix);
+      }
+      instanced.instanceMatrix.needsUpdate = true;
+      scene.add(instanced);
+    }
+  }
+
+  let terrainSampler = null;
+
+  function buildTerrainSampler(mesh) {
+    const position = mesh.geometry.attributes.position;
+    const grid = new Map();
+    const key = (x, z) => Math.round(x * 20) + "," + Math.round(z * 20);
+    const vertex = new THREE.Vector3();
+    for (let i = 0; i < position.count; i++) {
+      vertex.set(position.getX(i), position.getY(i), position.getZ(i)).applyMatrix4(mesh.matrixWorld);
+      grid.set(key(vertex.x, vertex.z), vertex.y);
+    }
+    terrainSampler = (x, z) => {
+      for (let ring = 0; ring < 6; ring++) {
+        const step = ring * 0.25;
+        for (let a = 0; a < 8; a++) {
+          const angle = a / 8 * Math.PI * 2;
+          const hit = grid.get(key(x + Math.cos(angle) * step, z + Math.sin(angle) * step));
+          if (hit !== undefined) return hit;
+        }
+      }
+      return 0;
+    };
+  }
+
+  function terrainHeightAt(x, z) {
+    return terrainSampler ? terrainSampler(x, z) : 0;
+  }
+
+  function upgradeGlassMaterials(root) {
+    root.traverse(object => {
+      if (!object.isMesh) return;
+      const name = object.name || "";
+      if (name.includes("GlassPane")) {
+        object.material = new THREE.MeshPhysicalMaterial({
+          color: 0xffffff,
+          roughness: 0.045,
+          metalness: 0,
+          transmission: 1,
+          thickness: 0.04,
+          ior: 1.33,
+          clearcoat: 0.6,
+          clearcoatRoughness: 0.08,
+          envMapIntensity: 0.55,
+          side: THREE.FrontSide,
+        });
+      } else if (name.includes("WaterDrop")) {
+        object.material = new THREE.MeshPhysicalMaterial({
+          color: 0xffffff,
+          roughness: 0.02,
+          metalness: 0,
+          transmission: 1,
+          thickness: 0.02,
+          ior: 1.33,
+          clearcoat: 0.8,
+          clearcoatRoughness: 0.03,
+          envMapIntensity: 0.65,
+          side: THREE.DoubleSide,
+        });
+      }
+      object.castShadow = false;
+      object.receiveShadow = false;
+    });
+  }
+
+  function layoutWindow() {
+    if (!windowMesh || !camera) return;
+    const bounds = shell.getBoundingClientRect();
+    const aspect = Math.max(0.4, bounds.width / Math.max(1, bounds.height));
+    const distance = camera.position.z - windowMesh.position.z;
+    const halfHeight = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * distance;
+    const neededHalfHeight = halfHeight * 1.18;
+    const neededHalfWidth = halfHeight * aspect * 1.12;
+    // The exported pane measures roughly 16 wide x 9 tall once upright.
+    const scale = Math.max(neededHalfHeight / 4.5, neededHalfWidth / 8.0) * 1.15;
+    windowMesh.scale.setScalar(scale);
+    windowMesh.position.y = camera.position.y - 0.55;
+  }
+
+  function createRain() {
+    const COUNT = 900;
+    const positions = new Float32Array(COUNT * 2 * 3);
+    rainDrops = Array.from({ length: COUNT }, () => ({
+      x: random(-34, 34),
+      y: random(0, 16),
+      z: random(-115, -6),
+      speed: random(9, 16),
+      drift: random(-0.6, 0.4),
+      length: random(0.35, 0.8),
+    }));
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    rainLines = new THREE.LineSegments(
+      geometry,
+      new THREE.LineBasicMaterial({
+        color: 0x8fa9c4,
+        transparent: true,
+        opacity: 0.32,
+        depthWrite: false,
+      })
     );
+    rainLines.frustumCulled = false;
+    scene.add(rainLines);
+    updateRain(0);
+  }
+
+  function updateRain(delta) {
+    if (!rainLines || !rainDrops) return;
+    const positions = rainLines.geometry.attributes.position;
+    const windX = 0.35;
+    const windZ = 0.12;
+    for (let i = 0; i < rainDrops.length; i++) {
+      const drop = rainDrops[i];
+      if (delta > 0) {
+        drop.y -= drop.speed * delta;
+        drop.x += (windX + drop.drift * 0.4) * delta;
+        drop.z += windZ * delta;
+        if (drop.y < -1) {
+          drop.y = random(14, 18);
+          drop.x = random(-34, 34);
+          drop.z = random(-115, -6);
+        }
+        if (drop.x > 36) drop.x = -36;
+        if (drop.x < -36) drop.x = 36;
+      }
+      const j = i * 6;
+      positions.array[j] = drop.x;
+      positions.array[j + 1] = drop.y;
+      positions.array[j + 2] = drop.z;
+      positions.array[j + 3] = drop.x - (windX + drop.drift * 0.4) * drop.length;
+      positions.array[j + 4] = drop.y + drop.length;
+      positions.array[j + 5] = drop.z - windZ * drop.length;
+    }
+    positions.needsUpdate = true;
+  }
+
+  function createBill() {
+    if (!noteTemplate) return null;
+    const clone = noteTemplate.clone(true);
+    clone.traverse(object => {
+      if (object.isMesh) {
+        object.castShadow = false;
+        object.receiveShadow = false;
+        if (object.material) {
+          const material = Array.isArray(object.material) ? object.material[0] : object.material;
+          material.side = THREE.DoubleSide;
+          material.envMapIntensity = 0.3;
+        }
+      }
+    });
     const mesh = new THREE.Group();
-    mesh.add(shadow, edge, paper);
-    const scale = random(0.58, 1.04);
+    mesh.add(clone);
+    // The note is modelled flat; stand it upright facing the camera.
+    mesh.rotation.x = Math.PI / 2;
+    const scale = random(0.5, 0.85);
     mesh.scale.setScalar(scale);
-    const z = random(-16, 2.4);
+    const z = random(-3.5, 3.5);
     const halfHeight = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * (camera.position.z - z);
     mesh.position.set(
       random(-halfHeight * camera.aspect * 0.84, halfHeight * camera.aspect * 0.84),
-      random(-halfHeight * 0.58, halfHeight * 0.5),
+      random(-halfHeight * 0.62, halfHeight * 0.55),
       z
     );
     scene.add(mesh);
     return {
       mesh,
-      geometry,
-      position,
-      basePositions,
       phase: random(0, Math.PI * 2),
       velocityY: random(0.25, 0.8),
       velocityX: random(-0.2, 0.2),
@@ -763,118 +584,34 @@
       lift: random(0.08, 0.24),
       drag: random(0.035, 0.095),
       terminalVelocity: random(2.6, 4.1),
-      angularX: random(-0.45, 0.45),
-      angularY: random(-0.7, 0.7),
-      angularZ: random(-0.42, 0.42),
+      angularX: random(-0.6, 0.6),
+      angularY: random(-1.15, 1.15),
+      angularZ: random(-0.7, 0.7),
       scale,
     };
   }
 
-  function createCropLayer() {
-    const vertices = [
-      0, 0, 0, -0.13, 0.12, 0, -0.19, 0.92, 0.05,
-      0, 0, 0, 0.13, 0.12, 0, 0.09, 0.78, 0.04,
-      0, 0, 0, -0.08, 0.2, 0, 0.025, 1.12, 0.08,
-      0, 0, 0, 0.08, 0.2, 0, 0.19, 0.98, 0.07,
-      0, 0, 0, -0.035, 0.1, 0, -0.04, 0.73, 0.03,
-    ];
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
-    geometry.computeVertexNormals();
-    const material = new THREE.MeshStandardMaterial({
-      color: 0xffffff,
-      roughness: 0.88,
-      envMapIntensity: 0.42,
-      side: THREE.DoubleSide,
-    });
-    cropShaderUniforms = { uCropTime: { value: 0 } };
-    material.onBeforeCompile = shader => {
-      shader.uniforms.uCropTime = cropShaderUniforms.uCropTime;
-      shader.vertexShader = shader.vertexShader
-        .replace("#include <common>", "#include <common>\nuniform float uCropTime;")
-        .replace(
-          "#include <begin_vertex>",
-          `#include <begin_vertex>
-          float ciaoCropWind = sin(uCropTime * 1.35 + position.y * 2.8 + instanceMatrix[3].x * 0.34);
-          transformed.x += ciaoCropWind * 0.06 * position.y;
-          transformed.z += cos(uCropTime * 1.08 + position.y * 2.2 + instanceMatrix[3].x * 0.27) * 0.025 * position.y;`
-        );
-    };
-    material.customProgramCacheKey = () => "ciaochat-crop-wind-v1";
-    const count = Math.min(520, Math.max(240, Math.round(width / 2.4)));
-    cropMesh = new THREE.InstancedMesh(geometry, material, count);
-    cropMesh.castShadow = true;
-    cropMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    cropDummy = new THREE.Object3D();
-    cropInstances = Array.from({ length: count }, () => {
-      const depth = random(0, 1);
-      const z = -7 - depth * 17;
-      const instance = {
-        xRatio: random(-1.08, 1.08),
-        bottom: random(0.25, 4.8),
-        z,
-        scale: (0.32 + depth * 0.72) * random(0.7, 1.25),
-        phase: random(0, Math.PI * 2),
-        depth,
-      };
-      return instance;
-    });
-    const tangent = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
-    for (let i = 0; i < cropInstances.length; i++) {
-      const crop = cropInstances[i];
-      const distance = camera.position.z - crop.z;
-      const halfHeight = tangent * distance;
-      cropDummy.position.set(crop.xRatio * halfHeight * camera.aspect, -halfHeight + crop.bottom, crop.z);
-      cropDummy.scale.setScalar(crop.scale);
-      cropDummy.updateMatrix();
-      cropMesh.setMatrixAt(i, cropDummy.matrix);
-      cropMesh.setColorAt(i, new THREE.Color().setHSL(0.23 + random(-0.025, 0.025), 0.3 + random(0, 0.22), 0.2 + crop.depth * 0.18));
+  function applyPixelRatio() {
+    if (!renderer) return;
+    const ratio = Math.min(window.devicePixelRatio || 1, PIXEL_STEPS[qualityIndex]);
+    const bounds = shell.getBoundingClientRect();
+    renderer.setPixelRatio(ratio);
+    renderer.setSize(bounds.width, bounds.height, false);
+    if (composer) {
+      composer.setPixelRatio(ratio);
+      composer.setSize(bounds.width, bounds.height);
     }
-    cropMesh.instanceMatrix.needsUpdate = true;
-    if (cropMesh.instanceColor) cropMesh.instanceColor.needsUpdate = true;
-    scene.add(cropMesh);
-  }
-
-  function updateCropLayer(seconds) {
-    if (!cropMesh || !cropDummy) return;
-    const tangent = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
-    for (let i = 0; i < cropInstances.length; i++) {
-      const crop = cropInstances[i];
-      const distance = camera.position.z - crop.z;
-      const halfHeight = tangent * distance;
-      cropDummy.position.set(
-        crop.xRatio * halfHeight * camera.aspect + parallax.x * 0.16,
-        -halfHeight + crop.bottom + parallax.y * 0.08,
-        crop.z
-      );
-      cropDummy.rotation.z = Math.sin(seconds * 1.25 + crop.phase) * 0.075;
-      cropDummy.scale.setScalar(crop.scale);
-      cropDummy.updateMatrix();
-      cropMesh.setMatrixAt(i, cropDummy.matrix);
-    }
-    cropMesh.instanceMatrix.needsUpdate = true;
   }
 
   function resizeScene() {
     if (!renderer || !camera) return;
     const bounds = shell.getBoundingClientRect();
     const aspect = Math.max(0.4, bounds.width / Math.max(1, bounds.height));
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.4));
-    renderer.setSize(bounds.width, bounds.height, false);
+    applyPixelRatio();
     camera.aspect = aspect;
     camera.updateProjectionMatrix();
-    camera.lookAt(0, 0, 0);
-    viewHeight = 2 * camera.position.z * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
-    if (farmPlane) {
-      const fieldDistance = camera.position.z - farmPlane.position.z;
-      const fieldHeight = 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * fieldDistance;
-      farmPlane.scale.set(fieldHeight * aspect * 1.16, fieldHeight * 1.16, 1);
-    }
-    if (glassMesh) {
-      const glassDistance = camera.position.z - glassMesh.position.z;
-      const glassHeight = 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * glassDistance;
-      glassMesh.scale.set(glassHeight * aspect * 1.12, glassHeight * 1.12, 1);
-    }
+    camera.lookAt(parallax.x * 0.17, 1.1 + parallax.y * 0.12, -12);
+    layoutWindow();
     for (const bill of bills) {
       const halfHeight = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * (camera.position.z - bill.mesh.position.z);
       bill.mesh.position.x = THREE.MathUtils.clamp(bill.mesh.position.x, -halfHeight * aspect * 0.9, halfHeight * aspect * 0.9);
@@ -882,141 +619,334 @@
   }
 
   function initializeThreeScene() {
-    if (!window.THREE) {
-      console.error("[login-scene] Three.js did not load; the animated banknotes are unavailable.");
-      return;
-    }
     try {
       renderer = new THREE.WebGLRenderer({
         canvas: sceneCanvas,
         antialias: true,
-        alpha: true,
-        powerPreference: "low-power",
+        alpha: false,
+        powerPreference: "high-performance",
       });
       renderer.shadowMap.enabled = true;
       renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-      renderer.physicallyCorrectLights = true;
-      renderer.setClearColor(0x07100a, 0);
-      renderer.outputEncoding = THREE.sRGBEncoding;
+      renderer.setClearColor(0x0a140d, 1);
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
-      renderer.toneMappingExposure = 1.12;
+      renderer.toneMappingExposure = 0.92;
 
       scene = new THREE.Scene();
-      scene.background = null;
-      scene.environment = createEnvironmentMap();
-      scene.fog = new THREE.FogExp2(0x07100a, 0.018);
-      camera = new THREE.PerspectiveCamera(42, 1, 0.1, 100);
-      camera.position.z = 18;
+      scene.background = new THREE.Color(0x070b10);
+      scene.fog = new THREE.FogExp2(0x101a22, 0.016);
+      camera = new THREE.PerspectiveCamera(42, 1, 0.1, 220);
+      camera.position.set(0, 1.85, 14);
+      camera.lookAt(0, 1.1, -12);
 
-      scene.add(new THREE.HemisphereLight(0xcbd8c9, 0x273529, 0.82));
-      scene.add(new THREE.AmbientLight(0xb7d4b8, 0.46));
-      const keyLight = new THREE.DirectionalLight(0xf0ffed, 2.7);
-      keyLight.position.set(-5, 8, 12);
+      scene.add(new THREE.HemisphereLight(0x33465c, 0x0a0f0c, 0.5));
+      const keyLight = new THREE.DirectionalLight(0x8fa8cc, 0.85);
+      keyLight.position.set(-9, 18, 6);
+      keyLight.target.position.set(0, 0, -30);
       keyLight.castShadow = true;
-      keyLight.shadow.mapSize.set(1024, 1024);
-      keyLight.shadow.camera.left = -24;
-      keyLight.shadow.camera.right = 24;
-      keyLight.shadow.camera.top = 18;
-      keyLight.shadow.camera.bottom = -18;
-      keyLight.shadow.camera.near = 0.1;
-      keyLight.shadow.camera.far = 90;
-      keyLight.shadow.bias = -0.0002;
-      keyLight.shadow.radius = 3;
-      scene.add(keyLight);
-      const rimLight = new THREE.DirectionalLight(0xdce9ce, 1.15);
-      rimLight.position.set(7, 4, -10);
-      scene.add(rimLight);
-      const greenFill = new THREE.PointLight(0x8caa7a, 2.2, 28);
-      greenFill.position.set(6, -2, 5);
-      scene.add(greenFill);
+      keyLight.shadow.mapSize.set(2048, 2048);
+      keyLight.shadow.camera.left = -38;
+      keyLight.shadow.camera.right = 38;
+      keyLight.shadow.camera.top = 38;
+      keyLight.shadow.camera.bottom = -38;
+      keyLight.shadow.camera.near = 1;
+      keyLight.shadow.camera.far = 110;
+      keyLight.shadow.bias = -0.0004;
+      scene.add(keyLight, keyLight.target);
+      const fillLight = new THREE.DirectionalLight(0x4a5f7d, 0.35);
+      fillLight.position.set(8, 6, -6);
+      scene.add(fillLight);
 
-      farmSceneTexture = new THREE.CanvasTexture(farmCanvas);
-      farmSceneTexture.encoding = THREE.sRGBEncoding;
-      farmSceneTexture.anisotropy = Math.min(4, renderer.capabilities.getMaxAnisotropy());
-      farmPlane = new THREE.Mesh(
-        new THREE.PlaneGeometry(1, 1),
-        new THREE.MeshStandardMaterial({ map: farmSceneTexture, roughness: 0.92, metalness: 0, fog: false })
+      // Endless ground plane: continues the field past the detailed terrain
+      // edge and dissolves into the night fog at the horizon.
+      const farGround = new THREE.Mesh(
+        new THREE.CircleGeometry(620, 72),
+        new THREE.MeshStandardMaterial({
+          color: 0x131a10,
+          roughness: 1,
+          metalness: 0,
+          envMapIntensity: 0.15,
+        })
       );
-      farmPlane.position.z = -34;
-      farmPlane.receiveShadow = true;
-      scene.add(farmPlane);
+      farGround.rotation.x = -Math.PI / 2;
+      farGround.position.set(0, -0.72, -160);
+      farGround.receiveShadow = true;
+      scene.add(farGround);
 
-      const glassMaterial = new THREE.MeshPhysicalMaterial({
-        color: 0xe7f3e8,
-        roughness: 0.1,
-        metalness: 0,
-        transmission: 0.24,
-        thickness: 0.12,
-        ior: 1.33,
-        clearcoat: 1,
-        clearcoatRoughness: 0.04,
-        envMapIntensity: 1.05,
-        transparent: true,
-        opacity: 0.16,
-        depthWrite: false,
-        side: THREE.DoubleSide,
-      });
-      glassShaderUniforms = addGlassShader(glassMaterial);
-      glassMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), glassMaterial);
-      glassMesh.position.z = 3;
-      scene.add(glassMesh);
+      createRain();
 
-      createCropLayer();
-
-      const shadowCanvas = document.createElement("canvas");
-      shadowCanvas.width = 128;
-      shadowCanvas.height = 128;
-      const shadowContext = shadowCanvas.getContext("2d");
-      const shadowGradient = shadowContext.createRadialGradient(64, 64, 8, 64, 64, 62);
-      shadowGradient.addColorStop(0, "rgba(0, 0, 0, 0.28)");
-      shadowGradient.addColorStop(0.5, "rgba(0, 0, 0, 0.12)");
-      shadowGradient.addColorStop(1, "rgba(0, 0, 0, 0)");
-      shadowContext.fillStyle = shadowGradient;
-      shadowContext.fillRect(0, 0, 128, 128);
-      const shadowTexture = new THREE.CanvasTexture(shadowCanvas);
-      shadowMaterial = new THREE.MeshBasicMaterial({
-        map: shadowTexture,
-        transparent: true,
-        opacity: 0.42,
-        depthWrite: false,
-      });
+      composer = new EffectComposer(renderer);
+      composer.addPass(new RenderPass(scene, camera));
+      composer.addPass(new BokehPass(scene, camera, {
+        focus: 13.5,
+        aperture: 0.014,
+        maxblur: 0.0035,
+      }));
 
       resizeScene();
-      const count = width < 640 ? 6 : 9;
-      bills = Array.from({ length: count }, (_, index) => createBill(index));
-      resizeScene();
+      window.__ciaoScene = { scene, camera, renderer, composer };
+      loadSceneAssets();
       return true;
     } catch (error) {
       renderer = null;
-      console.error("[login-scene] Could not initialize the 3D banknote scene.", error);
+      console.error("[login-scene] Could not initialize the 3D scene.", error);
       return false;
     }
   }
 
+  function loadSceneAssets() {
+    const gltfLoader = new GLTFLoader();
+    const hdrLoader = new RGBELoader();
+
+    // Track in-flight GLB loads so the shadow map can freeze once the
+    // (fully static) casters are all in place.
+    const rawGltfLoad = gltfLoader.load.bind(gltfLoader);
+    gltfLoader.load = function (url, onLoad, onProgress, onError) {
+      pendingAssets += 1;
+      const settle = callback => callback && ((...args) => {
+        pendingAssets = Math.max(0, pendingAssets - 1);
+        return callback(...args);
+      });
+      return rawGltfLoad(url, settle(onLoad), onProgress, settle(onError));
+    };
+
+    hdrLoader.load(
+      ASSET_BASE + "autumn-field-2k.hdr",
+      hdrTexture => {
+        try {
+          hdrTexture.mapping = THREE.EquirectangularReflectionMapping;
+          scene.background = hdrTexture;
+          if ("backgroundIntensity" in scene) scene.backgroundIntensity = 0.32;
+          if ("backgroundBlurriness" in scene) scene.backgroundBlurriness = 0.55;
+          const pmrem = new THREE.PMREMGenerator(renderer);
+          pmrem.compileCubemapShader();
+          scene.environment = pmrem.fromEquirectangular(hdrTexture).texture;
+          pmrem.dispose();
+          scene.traverse(object => {
+            if (object.material) object.material.needsUpdate = true;
+          });
+        } catch (error) {
+          console.error("[login-scene] Could not apply the HDR environment.", error);
+        }
+      },
+      undefined,
+      error => console.error("[login-scene] Could not load the HDR environment.", error)
+    );
+
+    // Trees stand on the detailed terrain inside its footprint and on the
+    // far ground plane beyond it.
+    function treeHeightAt(x, z) {
+      if (Math.abs(x) <= 44 && z >= -126 && z <= -10) return terrainHeightAt(x, z) - 0.06;
+      return -0.72;
+    }
+    const TREES = [
+      { file: "trees/fir_tree_01/fir_tree_01.glb", count: 9, area: { x: [-46, 46], z: [-118, -32] }, scale: [0.7, 1.5] },
+      { file: "trees/island_tree_01/island_tree_01.glb", count: 12, area: { x: [-46, 46], z: [-116, -34] }, scale: [0.8, 1.7] },
+    ];
+
+    // Field-edge light poles receding into the night, alternating the two
+    // Poly Haven lamp models. Each gets a glow sprite at the head and a soft
+    // additive pool of light on the ground — no dynamic lights needed.
+    const LAMP_FILES = [
+      "lamps/street_lamp_01/street_lamp_01.glb",
+      "lamps/street_lamp_02/street_lamp_02.glb",
+    ];
+    const LAMP_SPOTS = [
+      { file: 0, x: -20, z: -34 }, { file: 1, x: 21, z: -38 },
+      { file: 0, x: -23, z: -64 }, { file: 1, x: 24, z: -70 },
+      { file: 0, x: -26, z: -98 }, { file: 1, x: 27, z: -106 },
+      { file: 1, x: -21, z: -128 }, { file: 0, x: 22, z: -136 },
+    ];
+    const lampScenes = [];
+
+    let glowTexture = null;
+    function getGlowTexture() {
+      if (glowTexture) return glowTexture;
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = 128;
+      const ctx = canvas.getContext("2d");
+      const gradient = ctx.createRadialGradient(64, 64, 2, 64, 64, 64);
+      gradient.addColorStop(0, "rgba(255,255,255,1)");
+      gradient.addColorStop(0.35, "rgba(255,255,255,0.4)");
+      gradient.addColorStop(1, "rgba(255,255,255,0)");
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, 128, 128);
+      glowTexture = new THREE.CanvasTexture(canvas);
+      return glowTexture;
+    }
+
+    function placeLamps() {
+      const glowMap = getGlowTexture();
+      for (const spot of LAMP_SPOTS) {
+        const source = lampScenes[spot.file];
+        if (!source) continue;
+        const lamp = source.clone(true);
+        const scale = random(0.9, 1.15);
+        lamp.scale.setScalar(scale);
+        lamp.rotation.y = random(0, Math.PI * 2);
+        lamp.traverse(object => {
+          if (object.isMesh) {
+            object.castShadow = true;
+            object.receiveShadow = true;
+            if (object.material) object.material.envMapIntensity = 0.3;
+          }
+        });
+        scene.add(lamp);
+        lamp.updateMatrixWorld(true);
+        const box = new THREE.Box3().setFromObject(lamp);
+        const groundY = treeHeightAt(spot.x, spot.z);
+        lamp.position.set(spot.x, groundY - box.min.y, spot.z);
+        lamp.updateMatrixWorld(true);
+        const placed = new THREE.Box3().setFromObject(lamp);
+        const height = Math.max(0.1, placed.max.y - placed.min.y);
+        const head = new THREE.Vector3(
+          (placed.min.x + placed.max.x) / 2,
+          placed.max.y - height * 0.1,
+          (placed.min.z + placed.max.z) / 2
+        );
+        const glow = new THREE.Sprite(new THREE.SpriteMaterial({
+          map: glowMap,
+          color: 0xffb066,
+          transparent: true,
+          opacity: 0.75,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+          fog: false,
+        }));
+        glow.position.copy(head);
+        glow.scale.setScalar(clamp(height * 0.55, 1.2, 3.2));
+        scene.add(glow);
+        const poolRadius = clamp(height * 0.85, 3, 7);
+        const pool = new THREE.Mesh(
+          new THREE.CircleGeometry(poolRadius, 40),
+          new THREE.MeshBasicMaterial({
+            map: glowMap,
+            color: 0xff9a4d,
+            transparent: true,
+            opacity: 0.15,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+            fog: false,
+          })
+        );
+        pool.rotation.x = -Math.PI / 2;
+        pool.position.set(spot.x, groundY + 0.04, spot.z);
+        scene.add(pool);
+      }
+    }
+
+    const FIELD_AREA = { x: [-30, 30], z: [-108, -24] };
+    const SPECIES = [
+      { file: "grass-medium-02.glb", count: 22 },
+      { file: "grass-bermuda-01.glb", count: 40 },
+      { file: "nettle-plant.glb", count: 10 },
+    ];
+
+    gltfLoader.load(ASSET_BASE + "farm-terrain.glb", gltf => {
+      try {
+        const terrain = gltf.scene;
+        terrain.rotation.y = Math.PI;
+        terrain.scale.setScalar(1.55);
+        terrain.position.set(0, -0.04, -68);
+        terrain.traverse(object => {
+          if (object.isMesh) {
+            object.castShadow = false;
+            object.receiveShadow = true;
+            if (object.material) object.material.envMapIntensity = 0.3;
+          }
+        });
+        scene.add(terrain);
+        terrainMesh = terrain.children.find(child => child.isMesh) || null;
+        if (!terrainMesh) terrain.traverse(object => { if (object.isMesh && !terrainMesh) terrainMesh = object; });
+        terrain.updateMatrixWorld(true);
+        buildTerrainSampler(terrainMesh);
+        for (const species of SPECIES) {
+          gltfLoader.load(ASSET_BASE + species.file, plant => {
+            scatterSpecies(plant.scene, species.count, FIELD_AREA);
+          }, undefined, error => console.error(`[login-scene] Could not load ${species.file}.`, error));
+        }
+        for (const tree of TREES) {
+          gltfLoader.load(ASSET_BASE + tree.file, plant => {
+            scatterSpecies(plant.scene, tree.count, tree.area, treeHeightAt, tree.scale, false, false);
+          }, undefined, error => console.error(`[login-scene] Could not load ${tree.file}.`, error));
+        }
+        let lampsLoaded = 0;
+        LAMP_FILES.forEach((file, index) => {
+          gltfLoader.load(ASSET_BASE + file, lamp => {
+            lampScenes[index] = lamp.scene;
+            lampsLoaded += 1;
+            if (lampsLoaded === LAMP_FILES.length) placeLamps();
+          }, undefined, error => console.error(`[login-scene] Could not load ${file}.`, error));
+        });
+      } catch (error) {
+        console.error("[login-scene] Could not place the farm terrain.", error);
+      }
+    }, undefined, error => console.error("[login-scene] Could not load the farm terrain.", error));
+
+    gltfLoader.load(ASSET_BASE + "glass-window.glb", gltf => {
+      try {
+        const windowModel = gltf.scene;
+        windowModel.rotation.x = Math.PI / 2;
+        windowModel.position.set(0, 1.3, -5);
+        upgradeGlassMaterials(windowModel);
+        scene.add(windowModel);
+        windowMesh = windowModel;
+        layoutWindow();
+      } catch (error) {
+        console.error("[login-scene] Could not place the glass window.", error);
+      }
+    }, undefined, error => console.error("[login-scene] Could not load the glass window.", error));
+
+    gltfLoader.load(ASSET_BASE + "ciao-credit-note.glb", gltf => {
+      try {
+        noteTemplate = gltf.scene;
+        const fluttered = new Set();
+        noteTemplate.traverse(object => {
+          if (!object.isMesh || !object.material) return;
+          const material = Array.isArray(object.material) ? object.material[0] : object.material;
+          if (material && !fluttered.has(material)) {
+            fluttered.add(material);
+            addBillFlutter(material);
+          }
+        });
+        const count = width < 640 ? 6 : 9;
+        bills = Array.from({ length: count }, () => createBill()).filter(Boolean);
+        resizeScene();
+        assetsReady = true;
+        if (reducedMotionQuery.matches || document.body.classList.contains("reduced-motion") || !running) {
+          renderStaticScene(performance.now());
+        }
+      } catch (error) {
+        console.error("[login-scene] Could not load the credit note model.", error);
+      }
+    }, undefined, error => console.error("[login-scene] Could not load the credit note model.", error));
+  }
+
   function animate(now) {
     if (!running || authShellHidden()) return;
+    if (!animate.startedAt) animate.startedAt = now;
     const delta = Math.min(0.04, Math.max(0, (now - (animate.lastTime || now)) / 1000));
     const seconds = now / 1000;
     const reducedMotion = reducedMotionQuery.matches || document.body.classList.contains("reduced-motion");
     animate.lastTime = now;
-    if (cropShaderUniforms) cropShaderUniforms.uCropTime.value = reducedMotion ? 0 : seconds;
-    if (glassShaderUniforms) glassShaderUniforms.uCiaoGlassTime.value = reducedMotion ? 0 : seconds;
+    for (const uniforms of windUniforms) uniforms.uWindTime.value = reducedMotion ? 0 : seconds;
     if (!reducedMotion) {
       parallax.x += (parallaxTarget.x - parallax.x) * Math.min(1, delta * 2.4);
       parallax.y += (parallaxTarget.y - parallax.y) * Math.min(1, delta * 2.4);
     }
-    drawFarm(now);
     drawGlass(now, delta);
     drawField(now);
-    if (renderer) {
+    if (!reducedMotion) updateRain(delta);
+    if (renderer && scene && camera) {
       if (!reducedMotion) {
-        camera.position.x = parallax.x * 0.62;
-        camera.position.y = -parallax.y * 0.42;
-        camera.lookAt(parallax.x * 0.17, parallax.y * 0.12, 0);
+        camera.position.x = parallax.x * 0.55;
+        camera.position.y = 1.85 - parallax.y * 0.38;
+        camera.lookAt(parallax.x * 0.15, 1.1 - parallax.y * 0.1, -12);
       }
-      for (const bill of bills) {
-        const { mesh, geometry, position, basePositions, phase } = bill;
-        if (!reducedMotion) {
+      if (!reducedMotion) {
+        for (const bill of bills) {
+          const { mesh, phase } = bill;
           const lift = Math.sin(seconds * 2.3 + phase) * bill.lift;
           bill.velocityY = clamp(bill.velocityY + (bill.gravity - lift) * delta, 0.12, bill.terminalVelocity);
           bill.velocityY *= Math.max(0, 1 - bill.drag * delta);
@@ -1036,19 +966,40 @@
             bill.velocityX = random(-0.2, 0.2);
           }
         }
-        for (let vertex = 0; vertex < position.count; vertex++) {
-          const x = basePositions[vertex * 3];
-          const y = basePositions[vertex * 3 + 1];
-          const edge = Math.abs(x) / 1.7;
-          const ripple = Math.sin(x * 1.65 + seconds * 3.2 + phase) * 0.075;
-          const curl = Math.pow(edge, 2.4) * Math.sin(y * 2.4 + seconds * 2.4 + phase) * 0.11;
-          position.array[vertex * 3 + 2] = ripple + curl;
-        }
-        position.needsUpdate = true;
-        geometry.computeVertexNormals();
       }
-      if (!reducedMotion) updateCropLayer(seconds);
-      renderer.render(scene, camera);
+      if (composer) composer.render();
+      else renderer.render(scene, camera);
+
+      // Adaptive resolution: step the pixel ratio down when the GPU can't
+      // hold ~45 fps, back up when it has headroom. 2 s windows keep it
+      // from oscillating.
+      animate.fpsFrames = (animate.fpsFrames || 0) + 1;
+      animate.fpsWindow = (animate.fpsWindow || 0) + delta;
+      if (animate.fpsWindow >= 2) {
+        const fps = animate.fpsFrames / animate.fpsWindow;
+        animate.fpsFrames = 0;
+        animate.fpsWindow = 0;
+        if (fps < 45 && qualityIndex < PIXEL_STEPS.length - 1) {
+          qualityIndex += 1;
+          applyPixelRatio();
+        } else if (fps > 57 && qualityIndex > 0) {
+          qualityIndex -= 1;
+          applyPixelRatio();
+        } else if (fps < 30 && qualityIndex === PIXEL_STEPS.length - 1 && !bokehDisabled && composer) {
+          // Last resort on very weak GPUs: drop the DOF pass entirely.
+          // The fog + atmospheric perspective still carry the depth.
+          bokehDisabled = true;
+          composer.passes = composer.passes.filter(pass => !(pass instanceof BokehPass));
+        }
+      }
+
+      // The scene's shadow casters are static once every GLB has landed;
+      // freeze the shadow map so it isn't re-rendered every frame.
+      if (!shadowFrozen && pendingAssets === 0 && now - (animate.startedAt || now) > 8000) {
+        renderer.shadowMap.autoUpdate = false;
+        renderer.shadowMap.needsUpdate = true;
+        shadowFrozen = true;
+      }
     }
     if (running && !reducedMotionQuery.matches && !document.body.classList.contains("reduced-motion")) {
       frame = requestAnimationFrame(animate);
@@ -1073,13 +1024,12 @@
   }
 
   function renderStaticScene(now = performance.now()) {
-    drawFarm(now, true);
     drawGlass(now, 0, true);
     drawField(now);
-    updateCropLayer(0);
-    if (cropShaderUniforms) cropShaderUniforms.uCropTime.value = 0;
-    if (glassShaderUniforms) glassShaderUniforms.uCiaoGlassTime.value = 0;
-    if (renderer) renderer.render(scene, camera);
+    if (renderer && scene && camera && assetsReady) {
+      if (composer) composer.render();
+      else renderer.render(scene, camera);
+    }
   }
 
   resizeField();
@@ -1115,4 +1065,28 @@
       startAnimation();
     }
   });
+
+  function resizeField() {
+    const bounds = shell.getBoundingClientRect();
+    width = Math.max(1, bounds.width);
+    height = Math.max(1, bounds.height);
+    pixelRatio = Math.min(window.devicePixelRatio || 1, 1.4);
+    for (const canvas of [glassCanvas, sceneCanvas, fieldCanvas]) {
+      canvas.width = Math.round(width * pixelRatio);
+      canvas.height = Math.round(height * pixelRatio);
+      canvas.style.width = `${width}px`;
+      canvas.style.height = `${height}px`;
+    }
+    field.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+    glass.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+    createRaindrops();
+    if (renderer) {
+      resizeScene();
+      if (reducedMotionQuery.matches || document.body.classList.contains("reduced-motion")) {
+        renderStaticScene(performance.now());
+      }
+    }
+    drawGlass(performance.now(), 0, true);
+    drawField(performance.now());
+  }
 })();

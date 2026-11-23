@@ -74,8 +74,11 @@ async def index(request):
 
 
 async def static_file(request):
-    name = request.match_info["name"]
-    return web.FileResponse(os.path.join(STATIC_DIR, name))
+    tail = request.match_info.get("tail") or request.match_info.get("name") or ""
+    rel = os.path.normpath(tail).replace("\\", "/").lstrip("/")
+    if not rel or rel.startswith("..") or os.path.isabs(rel):
+        raise web.HTTPNotFound()
+    return web.FileResponse(os.path.join(STATIC_DIR, rel))
 
 async def emoji_file(request):
     name = request.match_info["name"]
@@ -335,7 +338,7 @@ def main():
     app = web.Application()
     app.router.add_get("/", index)
     app.router.add_get("/static/emoji/{name}", emoji_file)
-    app.router.add_get("/static/{name}", static_file)
+    app.router.add_get("/static/{tail:.*}", static_file)
     app.router.add_get("/ws", ws_handler)
     app.router.add_get("/api/users/@me", get_me)
     app.router.add_put("/api/users/@me", put_me)
