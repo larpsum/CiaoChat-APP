@@ -1135,15 +1135,20 @@ function startVoiceActivityGate() {
     source.connect(analyser);
     const buf = new Uint8Array(analyser.fftSize);
     const sensitivity = Math.max(0, Math.min(100, Number(localSettings.voiceSensitivity) || 50));
-    // Higher sensitivity -> lower threshold.
-    const threshold = 0.004 + ((100 - sensitivity) / 100) * 0.12;
+    // Higher sensitivity -> lower threshold. Kept low so normal speech
+    // always passes; the hangover below decides when to close the gate.
+    const threshold = 0.002 + ((100 - sensitivity) / 100) * 0.035;
+    let lastVoiceAt = 0;
     const tick = () => {
       if (!localStream) { vadAnimation = null; return; }
       analyser.getByteTimeDomainData(buf);
       let sum = 0;
       for (const v of buf) { const d = (v - 128) / 128; sum += d * d; }
       const rms = Math.sqrt(sum / buf.length);
-      const gate = rms > threshold;
+      const now = performance.now();
+      if (rms > threshold) lastVoiceAt = now;
+      // Open instantly on voice, close only after ~400 ms of silence.
+      const gate = now - lastVoiceAt < 400;
       if (gate !== voiceGate) {
         voiceGate = gate;
         applyMicState();
@@ -1246,7 +1251,14 @@ function attachRemoteMedia() {
   remoteAudioEl.srcObject = remoteStream;
   remoteAudioEl.muted = callDeafened;
   applyCallAudioSettings();
-  remoteAudioEl.play().catch(() => {});
+  remoteAudioEl.play().catch(() => {
+    // Autoplay may be blocked until a user gesture: resume on next click.
+    const resume = () => {
+      remoteAudioEl?.play().catch(() => {});
+      window.removeEventListener("pointerdown", resume);
+    };
+    window.addEventListener("pointerdown", resume);
+  });
   wrap.appendChild(remoteAudioEl);
   if (localStream?.getVideoTracks().length) {
     localVideoEl = document.createElement("video");
@@ -1325,12 +1337,14 @@ function cleanupCall() {
 }
 
 async function startOutgoingCall() {
-  try {
-    await acquireLocalMedia(activeCall?.video);
-  } catch {
-    send({ t: "c_end", call: activeCall?.id });
-    finishCall("Impossibile accedere a microfono" + (activeCall?.video ? " o camera" : "") + ". Controlla i permessi del browser.");
-    return;
+  if (!localStream) {
+    try {
+      await acquireLocalMedia(activeCall?.video);
+    } catch {
+      send({ t: "c_end", call: activeCall?.id });
+      finishCall("Impossibile accedere a microfono" + (activeCall?.video ? " o camera" : "") + ". Controlla i permessi del browser.");
+      return;
+    }
   }
   try {
     buildPeerConnection();
@@ -1395,21 +1409,33 @@ function startCall(video) {
     return;
   }
   activeCall = { to: selectedContact, video, state: "outgoing" };
-  if (!send({ t: "c_invite", to: selectedContact, video })) {
-    finishCall("Connessione non disponibile. Riprova.");
-    return;
-  }
-  renderCallPanel(`Chiamata ${video ? "video" : "vocale"} a ${selectedContact}...`, [{
-    label: "Annulla",
-    icon: "phone-x",
-    style: "btn-danger",
-    run: endActiveCall,
-  }]);
-  callTimer = setTimeout(() => {
-    if (activeCall?.state === "outgoing" && !activeCall.id) {
-      finishCall("Il server non ha risposto alla richiesta di chiamata.");
+  // Chiedi subito l'accesso a microfono/fotocamera: il prompt del browser
+  // parte dal gesto dell'utente, prima ancora che l'altro risponda.
+  acquireLocalMedia(video).then(() => {
+    if (activeCall?.state !== "outgoing") return;
+    if (!send({ t: "c_invite", to: selectedContact, video })) {
+      finishCall("Connessione non disponibile. Riprova.");
+      return;
     }
-  }, 20000);
+    renderCallPanel(`Chiamata ${video ? "video" : "vocale"} a ${selectedContact}...`, [{
+      label: "Annulla",
+      icon: "phone-x",
+      style: "btn-danger",
+      run: endActiveCall,
+    }]);
+    callTimer = setTimeout(() => {
+      if (activeCall?.state === "outgoing" && !activeCall.id) {
+        finishCall("Il server non ha risposto alla richiesta di chiamata.");
+      }
+    }, 20000);
+  }).catch(() => {
+    activeCall = null;
+    renderCallPanel("Impossibile accedere a microfono" + (video ? " o camera" : "") + ". Consenti il permesso nel browser e riprova.", [{
+      label: "Chiudi",
+      icon: "x",
+      run: () => renderCallPanel(""),
+    }]);
+  });
 }
 
 function acceptCall() {
