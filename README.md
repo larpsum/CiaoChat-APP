@@ -35,6 +35,8 @@ La registrazione non richiede un numero di telefono. Se ne inserisci uno, viene 
 
 I gruppi sono selezionabili dalla barra laterale. Canali e directory dei partecipanti restano nella vista a tre pannelli; inviti, selezione dei ruoli, modifica dei ruoli e rimozione dei membri avvengono in linea nel pannello destro. Le operazioni sono validate dal server secondo permessi e gerarchia dei ruoli.
 
+Il composer supporta ricerca contatti, formattazione, emoji, menzioni e invio di allegati JPG, PNG, WEBP, GIF e MP4 (massimo 1,7 MB). Le chiamate gestiscono inviti e segnalazione; il trasporto audio/video non è ancora disponibile.
+
 Il tema chiaro è disponibile in **Impostazioni > Aspetto & Testo**. Le icone dell'interfaccia usano il foglio di stile ufficiale Phosphor Web, caricato da unpkg.
 
 Le API HTTP locali sono disponibili sotto `/api/`. Richiedono `Authorization: Bearer <token>` e `X-CiaoChat-User: <username>`; comprendono le impostazioni utente, gruppi, ruoli, canali, inviti, membri, ban e audit log. Le richieste vengono inoltrate al server chat e usano le stesse verifiche di permesso del protocollo WebSocket.

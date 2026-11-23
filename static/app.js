@@ -31,9 +31,19 @@ let currentCommunity = null;
 let currentChannelId = null;
 let pendingGroupSelection = false;
 let memberActionPending = null;
+let memberActionTimer = null;
 let selectedInviteRoles = new Set();
 let pendingInvitations = [];
 let quickContactPending = false;
+let pendingChatAttachment = null;
+let attachmentUploadPending = false;
+let attachmentTimer = null;
+let activeCall = null;
+let pendingCommunityCreate = false;
+let pendingInviteResponse = null;
+let pendingInviteResponseTimer = null;
+let pendingCommunityCreateTimer = null;
+let quickContactTimer = null;
 
 const DEFAULT_LOCAL_SETTINGS = {
   theme: "dark",
@@ -90,6 +100,30 @@ function connect() {
   ws.onclose = () => {
     console.log("[ws] closed");
     sendQueue = [];
+    if (activeCall) finishCall("Connessione persa. La chiamata è stata interrotta.");
+    failMemberAction("Connessione persa. Riprova.");
+    if (quickContactPending) {
+      quickContactPending = false;
+      clearTimeout(quickContactTimer);
+      quickContactTimer = null;
+      el("quickContactFeedback").textContent = "Connessione persa. Riprova.";
+      el("quickContactFeedback").className = "error";
+    }
+    if (pendingCommunityCreate) {
+      pendingCommunityCreate = false;
+      clearTimeout(pendingCommunityCreateTimer);
+      pendingCommunityCreateTimer = null;
+      el("communityCreateFeedback").textContent = "Connessione persa. Riprova.";
+      el("communityCreateFeedback").className = "inline-action-feedback error";
+      el("createCommunityBtn").disabled = false;
+    }
+    if (pendingInviteResponse) {
+      finishInviteResponse("Connessione persa. Riprova.", true);
+    }
+    if (attachmentUploadPending) {
+      discardPendingAttachment();
+      setComposerFeedback("Upload interrotto per la perdita della connessione. Riprova.", "error");
+    }
     if (authShell.style.display !== "none") {
       setAuthMsg("Server non disponibile. Riprova tra qualche secondo.");
     } else if (me) {
@@ -201,6 +235,10 @@ const convBanner = el("convBanner");
 const messages = el("messages");
 const messageInput = el("messageInput");
 const sendBtn = el("sendBtn");
+const composerFeedback = el("composerFeedback");
+const attachmentInput = el("attachmentInput");
+const attachButton = el("attachButton");
+const attachmentPreview = el("attachmentPreview");
 const logoutBtn = el("logoutBtn");
 const profileModal = el("profileModal");
 const profileStatus = el("profileStatus");
@@ -214,14 +252,22 @@ const participantDirectory = el("participantDirectory");
 
 function renderContacts() {
   contactList.innerHTML = "";
-  if (contacts.length === 0) {
+  const query = contactSearch.value.trim().toLowerCase();
+  const visibleContacts = contacts.filter(contact => [
+    contact.name, contact.username, contact.id, contact.phone,
+  ].some(value => String(value || "").toLowerCase().includes(query)));
+  if (visibleContacts.length === 0) {
     contactList.appendChild(makeEmptyItem());
+    if (query && contacts.length) contactList.lastElementChild.textContent = "Nessun contatto corrispondente.";
     return;
   }
-  contacts.forEach(c => {
+  visibleContacts.forEach(c => {
     const username = c.id || c.username;
     const item = document.createElement("li");
     item.className = "contact-item" + (selectedContact === username ? " active" : "");
+    item.tabIndex = 0;
+    item.setAttribute("role", "button");
+    item.setAttribute("aria-label", `Apri conversazione con ${c.name || c.username || username}`);
     const avatar = makeAvatar(c, "contact-avatar");
     const details = document.createElement("div");
     details.className = "contact-details";
@@ -235,9 +281,17 @@ function renderContacts() {
     details.append(name, status);
     item.append(avatar, details);
     item.onclick = () => selectContact(username);
+    item.addEventListener("keydown", event => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        selectContact(username);
+      }
+    });
     contactList.appendChild(item);
   });
 }
+
+contactSearch.addEventListener("input", renderContacts);
 
 function makeEmptyItem() {
   const li = document.createElement("li");
@@ -279,6 +333,7 @@ function renderCommunityList(communities) {
 }
 
 function selectCommunity(communityId) {
+  discardPendingAttachment();
   currentCommunityId = communityId;
   currentCommunity = null;
   currentChannelId = null;
@@ -290,7 +345,7 @@ function selectCommunity(communityId) {
   convName.textContent = "Caricamento gruppo...";
   convStatus.textContent = "";
   messageInput.disabled = true;
-  sendBtn.disabled = true;
+  updateSendButton();
   participantDirectory.replaceChildren();
   el("memberInvitePanel").classList.remove("hidden");
   el("participantIndexTitle").textContent = "Participants - Loading...";
@@ -454,6 +509,11 @@ function renderParticipants(community) {
       revoke.setAttribute("aria-label", `Revoca invito per ${invitedUser}`);
       revoke.innerHTML = '<i class="ph ph-x" aria-hidden="true"></i>';
       revoke.addEventListener("click", () => {
+        if (memberActionPending || pendingInviteResponse || attachmentUploadPending) {
+          inviteFeedback.textContent = "Termina prima l'operazione in corso.";
+          inviteFeedback.className = "member-feedback error";
+          return;
+        }
         const success = send({
           t: "community_member_invite_revoke", community: currentCommunityId, user: userId,
         });
@@ -462,11 +522,11 @@ function renderParticipants(community) {
           inviteFeedback.className = "member-feedback error";
           return;
         }
-        memberActionPending = {
+        beginMemberAction({
           type: "revoke",
           retry: () => revoke.click(),
           feedback: inviteFeedback,
-        };
+        });
         inviteFeedback.textContent = "Revoca dell'invito...";
         inviteFeedback.className = "member-feedback";
       });
@@ -513,15 +573,18 @@ function showCommunityInChat(community) {
   });
   if (currentChannelId) {
     messageInput.disabled = false;
+    updateSendButton();
     send({ t: "community_channel_history", community: community.id, channel: currentChannelId });
   } else {
     messageInput.disabled = true;
+    updateSendButton();
     el("messages").replaceChildren(makePlaceholder("Nessun canale accessibile in questo gruppo."));
   }
 }
 
 function selectCommunityChannel(channelId) {
   if (!currentCommunity || !currentCommunity.channels?.some(channel => channel.id === channelId)) return;
+  discardPendingAttachment();
   currentChannelId = channelId;
   const channel = currentCommunity.channels.find(item => item.id === channelId);
   convStatus.textContent = `# ${channel.name}`;
@@ -529,6 +592,7 @@ function selectCommunityChannel(channelId) {
     button.classList.toggle("active", button.dataset.channelId === channelId);
   });
   messageInput.disabled = false;
+  updateSendButton();
   send({ t: "community_channel_history", community: currentCommunityId, channel: channelId });
 }
 
@@ -539,8 +603,80 @@ function renderCommunityHistory(items) {
   scrollBottom();
 }
 
+function appendRichText(parent, text) {
+  const pattern = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|\*\*([^*\n]+)\*\*|\*([^*\n]+)\*|(https?:\/\/[^\s<>]+)/g;
+  const value = String(text || "");
+  let cursor = 0;
+  for (const match of value.matchAll(pattern)) {
+    const index = match.index ?? 0;
+    if (index > cursor) parent.appendChild(document.createTextNode(value.slice(cursor, index)));
+    if (match[1]) {
+      const link = document.createElement("a");
+      link.href = match[2];
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = match[1];
+      parent.appendChild(link);
+    } else if (match[3]) {
+      const strong = document.createElement("strong");
+      strong.textContent = match[3];
+      parent.appendChild(strong);
+    } else if (match[4]) {
+      const emphasis = document.createElement("em");
+      emphasis.textContent = match[4];
+      parent.appendChild(emphasis);
+    } else {
+      const link = document.createElement("a");
+      link.href = match[5];
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = match[5];
+      parent.appendChild(link);
+    }
+    cursor = index + match[0].length;
+  }
+  if (cursor < value.length) parent.appendChild(document.createTextNode(value.slice(cursor)));
+}
+
+function renderMessageAttachment(attachment) {
+  if (!attachment?.hash) return null;
+  const source = mediaCache.get(attachment.hash);
+  if (!source) {
+    const load = document.createElement("button");
+    load.type = "button";
+    load.className = "message-attachment-loading";
+    load.dataset.attachmentHash = attachment.hash;
+    load.innerHTML = '<i class="ph ph-download-simple" aria-hidden="true"></i> Carica allegato';
+    load.addEventListener("click", () => {
+      if (send({ t: "media_get", hash: attachment.hash })) {
+        load.disabled = true;
+        load.textContent = "Caricamento...";
+        setTimeout(() => {
+          if (load.isConnected) {
+            load.disabled = false;
+            load.innerHTML = '<i class="ph ph-arrow-clockwise" aria-hidden="true"></i> Riprova';
+          }
+        }, 10000);
+      }
+    });
+    return load;
+  }
+  const media = source.startsWith("data:video/")
+    ? document.createElement("video") : document.createElement("img");
+  media.className = "message-attachment";
+  media.dataset.attachmentHash = attachment.hash;
+  media.src = source;
+  if (media instanceof HTMLVideoElement) {
+    media.controls = true;
+    media.playsInline = true;
+  } else {
+    media.alt = attachment.name || "Allegato";
+  }
+  return media;
+}
+
 function appendCommunityMessage(item) {
-  if (!item || !item.text) return;
+  if (!item || (!item.text && !item.attachment)) return;
   const div = document.createElement("div");
   div.className = `msg ${item.from === me?.id ? "self" : "other"}`;
   if (item.from !== me?.id) {
@@ -550,7 +686,9 @@ function appendCommunityMessage(item) {
     author.textContent = participant?.name || participant?.username || item.from;
     div.appendChild(author);
   }
-  div.append(document.createTextNode(item.text));
+  appendRichText(div, item.text);
+  const attachment = renderMessageAttachment(item.attachment);
+  if (attachment) div.appendChild(attachment);
   const metadata = document.createElement("span");
   metadata.className = "meta";
   metadata.textContent = item.timestamp
@@ -608,6 +746,11 @@ function toggleInlineRoleEditor(row, participant, roles) {
   save.className = "btn btn-primary small-btn";
   save.textContent = "Salva ruoli";
   save.addEventListener("click", () => {
+    if (memberActionPending || pendingInviteResponse || attachmentUploadPending) {
+      feedback.textContent = "Termina prima l'operazione in corso.";
+      feedback.className = "member-feedback error";
+      return;
+    }
     const success = send({
       t: "community_member_roles",
       community: currentCommunityId,
@@ -619,11 +762,11 @@ function toggleInlineRoleEditor(row, participant, roles) {
       feedback.className = "member-feedback error";
       return;
     }
-    memberActionPending = {
+    beginMemberAction({
       type: "roles",
       retry: () => save.click(),
       feedback,
-    };
+    });
     feedback.textContent = "Salvataggio ruoli...";
     feedback.className = "member-feedback";
   });
@@ -656,6 +799,11 @@ function showInlineRemoveConfirmation(row, participant) {
   cancel.textContent = "Annulla";
   cancel.addEventListener("click", () => confirmation.remove());
   remove.addEventListener("click", () => {
+    if (memberActionPending || pendingInviteResponse || attachmentUploadPending) {
+      feedback.textContent = "Termina prima l'operazione in corso.";
+      feedback.className = "member-feedback error";
+      return;
+    }
     const success = send({
       t: "community_kick",
       community: currentCommunityId,
@@ -666,11 +814,11 @@ function showInlineRemoveConfirmation(row, participant) {
       text.textContent = "Connessione non disponibile. Riprova.";
       return;
     }
-    memberActionPending = {
+    beginMemberAction({
       type: "remove",
       retry: () => remove.click(),
       feedback,
-    };
+    });
     row.classList.add("removing");
     text.textContent = "Rimozione in corso...";
   });
@@ -690,31 +838,200 @@ function renderPendingInvitations(invitations) {
     const message = document.createElement("span");
     message.textContent = `${invitation.inviter} ti ha invitato in ${invitation.name}`;
     const actions = document.createElement("div");
+    const feedback = document.createElement("div");
+    feedback.className = "member-feedback";
+    feedback.setAttribute("role", "status");
     const accept = document.createElement("button");
     accept.type = "button";
     accept.className = "btn btn-primary small-btn";
     accept.innerHTML = '<i class="ph ph-check" aria-hidden="true"></i> Accetta';
-    accept.addEventListener("click", () => send({
-      t: "community_invite_response", community: invitation.community, action: "accept",
-    }));
+    accept.addEventListener("click", () => respondToInvite(invitation, "accept", accept, feedback));
     const decline = document.createElement("button");
     decline.type = "button";
     decline.className = "btn btn-outline small-btn";
     decline.innerHTML = '<i class="ph ph-x" aria-hidden="true"></i> Rifiuta';
-    decline.addEventListener("click", () => send({
-      t: "community_invite_response", community: invitation.community, action: "decline",
-    }));
+    decline.addEventListener("click", () => respondToInvite(invitation, "decline", decline, feedback));
     actions.append(accept, decline);
-    row.append(message, actions);
+    row.append(message, actions, feedback);
     list.appendChild(row);
   });
+}
+
+function respondToInvite(invitation, action, button, feedback) {
+  if (pendingInviteResponse || memberActionPending || attachmentUploadPending) {
+    feedback.textContent = "Termina prima l'operazione in corso.";
+    feedback.className = "member-feedback error";
+    return;
+  }
+  if (!send({
+    t: "community_invite_response",
+    community: invitation.community,
+    action,
+  })) {
+    feedback.textContent = "Connessione non disponibile. Riprova.";
+    feedback.className = "member-feedback error";
+    return;
+  }
+  pendingInviteResponse = { invitation, action, button, feedback };
+  button.disabled = true;
+  feedback.textContent = action === "accept" ? "Accettazione..." : "Rifiuto...";
+  feedback.className = "member-feedback";
+  pendingInviteResponseTimer = setTimeout(() => {
+    finishInviteResponse("Il server non ha risposto. Riprova.", true);
+  }, 20000);
+}
+
+function finishInviteResponse(message = "", isError = false) {
+  if (!pendingInviteResponse) return;
+  const pending = pendingInviteResponse;
+  clearTimeout(pendingInviteResponseTimer);
+  pendingInviteResponseTimer = null;
+  pendingInviteResponse = null;
+  pending.button.disabled = false;
+  pending.feedback.textContent = message;
+  pending.feedback.className = `member-feedback${isError ? " error" : ""}`;
+  if (isError) {
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "member-retry";
+    retry.textContent = "Riprova";
+    retry.addEventListener("click", () => respondToInvite(
+      pending.invitation, pending.action, pending.button, pending.feedback
+    ));
+    pending.feedback.append(" ", retry);
+  }
+}
+
+let callTimer = null;
+function renderCallPanel(message, actions = []) {
+  const panel = el("callPanel");
+  panel.classList.toggle("hidden", !message);
+  el("callStatus").textContent = message || "";
+  const container = el("callActions");
+  container.replaceChildren();
+  actions.forEach(({ label, icon, run, style = "btn-outline" }) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `btn ${style} small-btn`;
+    button.innerHTML = `<i class="ph ph-${icon}" aria-hidden="true"></i> ${escapeHtml(label)}`;
+    button.addEventListener("click", run);
+    container.appendChild(button);
+  });
+}
+
+function finishCall(message = "") {
+  clearTimeout(callTimer);
+  callTimer = null;
+  activeCall = null;
+  renderCallPanel(message);
+  if (message) {
+    callTimer = setTimeout(() => renderCallPanel(""), 5000);
+  }
+}
+
+function endActiveCall() {
+  const call = activeCall;
+  if (!call) return;
+  if (call.id && !send({ t: "c_end", call: call.id })) {
+    finishCall("Connessione non disponibile. La chiamata potrebbe essere ancora attiva.");
+    return;
+  }
+  finishCall("Chiamata terminata.");
+}
+
+function startCall(video) {
+  clearTimeout(callTimer);
+  callTimer = null;
+  if (!selectedContact) {
+    renderCallPanel("Seleziona un contatto per avviare una chiamata.");
+    return;
+  }
+  if (activeCall) {
+    renderCallPanel("È già in corso una chiamata.", [{
+      label: "Termina",
+      icon: "phone-x",
+      style: "btn-danger",
+      run: endActiveCall,
+    }]);
+    return;
+  }
+  activeCall = { to: selectedContact, video, state: "outgoing" };
+  if (!send({ t: "c_invite", to: selectedContact, video })) {
+    finishCall("Connessione non disponibile. Riprova.");
+    return;
+  }
+  renderCallPanel(`Chiamata ${video ? "video" : "vocale"} a ${selectedContact}...`, [{
+    label: "Annulla",
+    icon: "phone-x",
+    style: "btn-danger",
+    run: endActiveCall,
+  }]);
+  callTimer = setTimeout(() => {
+    if (activeCall?.state === "outgoing" && !activeCall.id) {
+      finishCall("Il server non ha risposto alla richiesta di chiamata.");
+    }
+  }, 20000);
+}
+
+function acceptCall() {
+  if (!activeCall?.id || !send({ t: "c_accept", call: activeCall.id })) {
+    finishCall("Impossibile rispondere alla chiamata. Riprova.");
+    return;
+  }
+  clearTimeout(callTimer);
+  activeCall.state = "active";
+  renderCallPanel("Chiamata accettata. Audio/video non disponibile in questa sessione.", [{
+    label: "Termina",
+    icon: "phone-x",
+    style: "btn-danger",
+    run: endActiveCall,
+  }]);
 }
 
 function avatarInitial(name) {
   return (name || "?").charAt(0).toUpperCase();
 }
 
+function beginMemberAction(action) {
+  if (memberActionPending || pendingInviteResponse || attachmentUploadPending) return false;
+  memberActionPending = action;
+  memberActionTimer = setTimeout(() => {
+    failMemberAction("Il server non ha risposto. Controlla la connessione e riprova.");
+  }, 20000);
+  return true;
+}
+
+function finishMemberAction() {
+  clearTimeout(memberActionTimer);
+  memberActionTimer = null;
+  memberActionPending = null;
+}
+
+function failMemberAction(message) {
+  if (!memberActionPending) return;
+  const pending = memberActionPending;
+  finishMemberAction();
+  const feedback = pending.feedback || el("memberInviteFeedback");
+  feedback.replaceChildren();
+  feedback.textContent = message || "Operazione non riuscita.";
+  feedback.className = "member-feedback error";
+  if (pending.type === "invite") el("invitePersonBtn").disabled = false;
+  if (/connessione|riprova|timeout|server|risposto/i.test(feedback.textContent)) {
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "member-retry";
+    retry.textContent = "Riprova";
+    retry.addEventListener("click", pending.retry);
+    feedback.append(" ", retry);
+  }
+  if (pending.type === "remove") {
+    const row = participantDirectory.querySelector(".participant-row.removing");
+    row?.classList.remove("removing");
+  }
+}
+
 function selectContact(username) {
+  discardPendingAttachment();
   currentCommunityId = null;
   currentCommunity = null;
   currentChannelId = null;
@@ -734,7 +1051,7 @@ function selectContact(username) {
   messages.appendChild(makePlaceholder("Seleziona un contatto per iniziare a chattare."));
   send({ t: "history", with: username });
   messageInput.disabled = false;
-  sendBtn.disabled = true;
+  updateSendButton();
   messageInput.focus();
 }
 
@@ -1220,7 +1537,7 @@ function renderCommunitySnapshot(data) {
       <div class="settings-list">${Object.entries(bans).map(([user, ban]) => `<div class="settings-list-item"><span><strong>${escapeHtml(user)}</strong><small class="muted">${escapeHtml(ban.reason || "")}</small></span><button class="btn btn-outline small-btn unban-user" data-user="${escapeHtml(user)}">Rimuovi ban</button></div>`).join("") || '<span class="muted">Nessun utente bannato.</span>'}</div>
     </div>
     <div class="community-subpanel" data-community-panel="audit">
-      <input id="auditFilter" type="search" placeholder="Filtra azioni..." style="width:100%;padding:9px;border:1px solid var(--border);border-radius:8px;background:#0f172a;margin-bottom:10px">
+      <input id="auditFilter" type="search" placeholder="Filtra azioni..." style="width:100%;padding:9px;border:1px solid var(--border);border-radius:8px;margin-bottom:10px">
       <div class="settings-list">${audit.map(event => `<div class="settings-list-item audit-event" data-action="${escapeHtml(event.action)}"><span><strong>${escapeHtml(event.action)}</strong><small class="muted">${escapeHtml(event.actor)} · ${new Date((event.timestamp || 0) * 1000).toLocaleString()}</small></span></div>`).join("") || '<span class="muted">Nessuna attività registrata.</span>'}</div>
     </div>
   `;
@@ -1250,7 +1567,8 @@ function bindCommunityControls(data) {
     el(id)?.addEventListener("change", event => {
       const file = event.target.files[0];
       if (!file) return;
-      const extension = /\.([^.]+)$/.exec(file.name)?.[1].toLowerCase();
+      const rawExtension = /\.([^.]+)$/.exec(file.name)?.[1].toLowerCase();
+      const extension = rawExtension === "jpeg" ? "jpg" : rawExtension;
       if (!extension) return;
       const reader = new FileReader();
       reader.onload = () => send({
@@ -1615,6 +1933,13 @@ function submitQuickContact() {
   quickContactPending = true;
   feedback.textContent = "Ricerca contatto...";
   feedback.className = "";
+  clearTimeout(quickContactTimer);
+  quickContactTimer = setTimeout(() => {
+    if (!quickContactPending) return;
+    quickContactPending = false;
+    feedback.textContent = "Il server non ha risposto. Riprova.";
+    feedback.className = "error";
+  }, 20000);
 }
 
 el("quickContactAddBtn").addEventListener("click", submitQuickContact);
@@ -1627,15 +1952,38 @@ el("quickContactInput").addEventListener("keydown", event => {
 el("createCommunityBtn").addEventListener("click", () => {
   const input = el("newCommunityName");
   const name = input.value.trim();
+  const feedback = el("communityCreateFeedback");
   if (!name) {
     input.setCustomValidity("Inserisci il nome del gruppo.");
     input.reportValidity();
     return;
   }
   input.setCustomValidity("");
-  send({ t: "community_create", name });
+  if (pendingCommunityCreate) return;
+  if (!send({ t: "community_create", name })) {
+    feedback.textContent = "Connessione non disponibile. Riprova.";
+    feedback.className = "inline-action-feedback error";
+    return;
+  }
+  pendingCommunityCreate = true;
+  el("createCommunityBtn").disabled = true;
+  feedback.textContent = "Creazione del gruppo...";
+  feedback.className = "inline-action-feedback";
+  pendingCommunityCreateTimer = setTimeout(() => {
+    if (!pendingCommunityCreate) return;
+    pendingCommunityCreate = false;
+    el("createCommunityBtn").disabled = false;
+    feedback.textContent = "Il server non ha risposto. Riprova.";
+    feedback.className = "inline-action-feedback error";
+  }, 20000);
 });
 el("newCommunityName").addEventListener("input", event => event.target.setCustomValidity(""));
+el("newCommunityName").addEventListener("keydown", event => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    el("createCommunityBtn").click();
+  }
+});
 
 function submitMemberInvite() {
   const input = el("memberIdentifier");
@@ -1643,6 +1991,11 @@ function submitMemberInvite() {
   const feedback = el("memberInviteFeedback");
   feedback.replaceChildren();
   feedback.className = "member-feedback";
+  if (memberActionPending || pendingInviteResponse || attachmentUploadPending) {
+    feedback.textContent = "Termina prima l'operazione in corso.";
+    feedback.classList.add("error");
+    return;
+  }
   if (!currentCommunityId || !currentCommunity) {
     feedback.textContent = "Seleziona prima un gruppo.";
     feedback.classList.add("error");
@@ -1683,11 +2036,11 @@ function submitMemberInvite() {
     feedback.classList.add("error");
     return;
   }
-  memberActionPending = {
+  beginMemberAction({
     type: "invite",
     retry: () => submitMemberInvite(),
     feedback,
-  };
+  });
   el("invitePersonBtn").disabled = true;
   feedback.textContent = "Invio dell'invito...";
 }
@@ -1738,6 +2091,275 @@ el("openGroupSettingsBtn").addEventListener("click", () => {
   }
 });
 
+el("searchButton").addEventListener("click", () => {
+  const search = currentCommunity ? participantSearch : contactSearch;
+  search.focus();
+  search.select?.();
+});
+el("microphoneButton").addEventListener("click", () => {
+  openProfileModal();
+  switchSettingsSection("voice");
+  el("micLoopback").focus();
+});
+el("voiceCallButton").addEventListener("click", () => startCall(false));
+el("callButton").addEventListener("click", () => startCall(true));
+
+function setComposerFeedback(message, state = "") {
+  composerFeedback.textContent = message;
+  composerFeedback.className = `composer-feedback${state ? ` ${state}` : ""}`;
+}
+
+function updateSendButton() {
+  const hasAttachment = !!pendingChatAttachment?.hash;
+  sendBtn.disabled = messageInput.disabled || attachmentUploadPending ||
+    (!messageInput.value.trim() && !hasAttachment);
+}
+
+function discardPendingAttachment() {
+  clearTimeout(attachmentTimer);
+  attachmentTimer = null;
+  attachmentUploadPending = false;
+  pendingChatAttachment = null;
+  attachButton.disabled = false;
+  attachmentInput.value = "";
+  attachmentPreview.replaceChildren();
+  attachmentPreview.classList.add("hidden");
+  updateSendButton();
+}
+
+function renderPendingAttachment() {
+  attachmentPreview.replaceChildren();
+  attachmentPreview.classList.toggle("hidden", !pendingChatAttachment);
+  if (!pendingChatAttachment) return;
+  const label = document.createElement("span");
+  label.innerHTML = `<i class="ph ph-${attachmentUploadPending ? "circle-notch" : "paperclip"}" aria-hidden="true"></i> `;
+  label.append(document.createTextNode(
+    `${pendingChatAttachment.name}${attachmentUploadPending ? " · Caricamento..." : " · Pronto per l'invio"}`
+  ));
+  attachmentPreview.appendChild(label);
+  if (!attachmentUploadPending) {
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "icon-btn";
+    remove.setAttribute("aria-label", "Rimuovi allegato");
+    remove.innerHTML = '<i class="ph ph-x" aria-hidden="true"></i>';
+    remove.addEventListener("click", discardPendingAttachment);
+    attachmentPreview.appendChild(remove);
+  }
+}
+
+function uploadChatAttachment(file) {
+  if (!selectedContact && !(currentCommunityId && currentChannelId)) {
+    setComposerFeedback("Apri una conversazione prima di allegare un file.", "error");
+    return;
+  }
+  const rawExtension = /\.([^.]+)$/.exec(file.name)?.[1].toLowerCase();
+  const extension = rawExtension === "jpeg" ? "jpg" : rawExtension;
+  const mimeByExtension = {
+    jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
+    webp: "image/webp", gif: "image/gif", mp4: "video/mp4",
+  };
+  if (!extension || !mimeByExtension[extension]) {
+    setComposerFeedback("Sono supportati solo JPG, PNG, WEBP, GIF e MP4.", "error");
+    return;
+  }
+  if (!file.size || file.size > 1_700_000) {
+    setComposerFeedback("L'allegato deve essere inferiore a 1,7 MB.", "error");
+    return;
+  }
+  if (attachmentUploadPending) {
+    setComposerFeedback("Attendi il completamento dell'upload corrente.", "error");
+    return;
+  }
+  if (memberActionPending || pendingInviteResponse) {
+    setComposerFeedback("Attendi il completamento dell'operazione in corso.", "error");
+    return;
+  }
+  pendingChatAttachment = {
+    name: file.name,
+    mime: file.type || mimeByExtension[extension],
+    target: currentCommunityId && currentChannelId
+      ? { community: currentCommunityId, channel: currentChannelId }
+      : { to: selectedContact },
+  };
+  attachmentUploadPending = true;
+  attachButton.disabled = true;
+  setComposerFeedback("", "");
+  renderPendingAttachment();
+  updateSendButton();
+  const upload = pendingChatAttachment;
+  const reader = new FileReader();
+  reader.onerror = () => {
+    if (pendingChatAttachment !== upload) return;
+    discardPendingAttachment();
+    setComposerFeedback("Impossibile leggere il file selezionato.", "error");
+  };
+  reader.onload = () => {
+    if (pendingChatAttachment !== upload) return;
+    const data = String(reader.result).split(",", 2)[1];
+    if (!data || !send({ t: "media_put", kind: "attachment", extension, data })) {
+      discardPendingAttachment();
+      setComposerFeedback("Upload non avviato. Controlla la connessione e riprova.", "error");
+      return;
+    }
+    attachmentTimer = setTimeout(() => {
+      if (!attachmentUploadPending) return;
+      discardPendingAttachment();
+      setComposerFeedback("Upload scaduto. Seleziona di nuovo il file.", "error");
+    }, 20000);
+  };
+  reader.readAsDataURL(file);
+}
+
+function sendChatMessage() {
+  const text = messageInput.value.trim();
+  if (attachmentUploadPending) {
+    setComposerFeedback("Attendi il completamento dell'upload.", "error");
+    return;
+  }
+  const attachment = pendingChatAttachment?.hash ? {
+    hash: pendingChatAttachment.hash,
+    name: pendingChatAttachment.name,
+  } : null;
+  if (!text && !attachment) return;
+  const target = attachment
+    ? pendingChatAttachment.target
+    : currentCommunityId && currentChannelId
+      ? { community: currentCommunityId, channel: currentChannelId }
+      : selectedContact
+        ? { to: selectedContact }
+        : null;
+  const payload = target?.community
+    ? { t: "community_channel_send", ...target, text, ...(attachment ? { attachment } : {}) }
+    : { t: "dm", to: target?.to || selectedContact, text, ...(attachment ? { attachment } : {}) };
+  if (!payload.to && !payload.community) {
+    setComposerFeedback("Seleziona una conversazione o un canale.", "error");
+    return;
+  }
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    setComposerFeedback("Connessione non disponibile. Il messaggio è ancora qui: riprova.", "error");
+    return;
+  }
+  if (!send(payload)) {
+    setComposerFeedback("Messaggio non inviato: connessione non disponibile.", "error");
+    return;
+  }
+  messageInput.value = "";
+  discardPendingAttachment();
+  setComposerFeedback("", "");
+  updateSendButton();
+}
+
+function insertAtCursor(value, selectFromEnd = 0) {
+  const start = messageInput.selectionStart;
+  const end = messageInput.selectionEnd;
+  const text = messageInput.value;
+  messageInput.value = text.slice(0, start) + value + text.slice(end);
+  const cursor = start + value.length - selectFromEnd;
+  messageInput.setSelectionRange(cursor, cursor);
+  messageInput.focus();
+  updateSendButton();
+}
+
+function wrapSelection(marker) {
+  const start = messageInput.selectionStart;
+  const end = messageInput.selectionEnd;
+  const selected = messageInput.value.slice(start, end);
+  const replacement = selected
+    ? `${marker}${selected}${marker}`
+    : `${marker}${marker}`;
+  const caret = start + marker.length + (selected ? selected.length : 0);
+  messageInput.setRangeText(replacement, start, end, "end");
+  if (!selected) messageInput.setSelectionRange(caret, caret);
+  messageInput.focus();
+  updateSendButton();
+}
+
+function toggleComposerPicker(button, panel, render) {
+  const opening = panel.classList.contains("hidden");
+  el("emojiPicker").classList.add("hidden");
+  el("mentionPicker").classList.add("hidden");
+  el("emojiButton").setAttribute("aria-expanded", "false");
+  el("mentionButton").setAttribute("aria-expanded", "false");
+  if (opening) {
+    render();
+    panel.classList.remove("hidden");
+    button.setAttribute("aria-expanded", "true");
+  }
+}
+
+const commonEmoji = ["😀", "😂", "😊", "😍", "👍", "👏", "🎉", "❤️", "🙏", "🔥"];
+el("emojiButton").addEventListener("click", () => {
+  toggleComposerPicker(el("emojiButton"), el("emojiPicker"), () => {
+    const panel = el("emojiPicker");
+    panel.replaceChildren();
+    commonEmoji.forEach(emoji => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "emoji-choice";
+      button.textContent = emoji;
+      button.setAttribute("aria-label", emoji);
+      button.addEventListener("click", () => {
+        insertAtCursor(emoji);
+        panel.classList.add("hidden");
+        el("emojiButton").setAttribute("aria-expanded", "false");
+      });
+      panel.appendChild(button);
+    });
+  });
+});
+el("boldButton").addEventListener("click", () => wrapSelection("**"));
+el("italicButton").addEventListener("click", () => wrapSelection("*"));
+el("linkButton").addEventListener("click", () => {
+  const start = messageInput.selectionStart;
+  const end = messageInput.selectionEnd;
+  const selected = messageInput.value.slice(start, end);
+  if (selected) {
+    const replacement = `[${selected}](https://)`;
+    messageInput.setRangeText(replacement, start, end, "end");
+    const cursor = start + selected.length + 3;
+    messageInput.setSelectionRange(cursor, cursor + 8);
+    messageInput.focus();
+    updateSendButton();
+  } else {
+    insertAtCursor("https://");
+  }
+});
+el("mentionButton").addEventListener("click", () => {
+  toggleComposerPicker(el("mentionButton"), el("mentionPicker"), () => {
+    const panel = el("mentionPicker");
+    panel.replaceChildren();
+    const candidates = currentCommunity?.participants || (
+      selectedContact ? [contactProfile(selectedContact)].filter(Boolean) : []
+    );
+    if (!candidates.length) {
+      const empty = document.createElement("span");
+      empty.className = "muted";
+      empty.textContent = "Seleziona una conversazione per menzionare qualcuno.";
+      panel.appendChild(empty);
+      return;
+    }
+    candidates.forEach(person => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "mention-choice";
+      button.textContent = `@${person.username || person.id}`;
+      button.addEventListener("click", () => {
+        insertAtCursor(`${button.textContent} `);
+        panel.classList.add("hidden");
+        el("mentionButton").setAttribute("aria-expanded", "false");
+      });
+      panel.appendChild(button);
+    });
+  });
+});
+attachButton.addEventListener("click", () => attachmentInput.click());
+attachmentInput.addEventListener("change", event => {
+  const file = event.target.files?.[0];
+  event.target.value = "";
+  if (file) uploadChatAttachment(file);
+});
+
 logoutBtn.onclick = () => {
   send({ t: "logout", token });
   closeProfileModal();
@@ -1746,31 +2368,24 @@ logoutBtn.onclick = () => {
   selectedContact = null;
   contacts = [];
   resumePending = false;
+  finishCall();
+  discardPendingAttachment();
   showAuth();
 };
 
 messageInput.addEventListener("input", () => {
-  sendBtn.disabled = !messageInput.value.trim();
+  updateSendButton();
 });
-
-sendBtn.onclick = () => {
-  const text = messageInput.value.trim();
-  if (!text) return;
-  if (currentCommunityId && currentChannelId) {
-    send({
-      t: "community_channel_send",
-      community: currentCommunityId,
-      channel: currentChannelId,
-      text,
-    });
-  } else if (selectedContact) {
-    send({ t: "dm", to: selectedContact, text });
-  } else {
-    return;
+messageInput.addEventListener("keydown", event => {
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    sendChatMessage();
   }
-  messageInput.value = "";
-  sendBtn.disabled = true;
-};
+});
+sendBtn.addEventListener("click", sendChatMessage);
+el("searchButton").setAttribute("aria-label", "Cerca contatti o partecipanti");
+el("microphoneButton").title = "Apri test microfono";
+el("microphoneButton").setAttribute("aria-label", "Apri test microfono");
 
 // ---------- Incoming messages ----------
 function onMessage(event) {
@@ -1835,6 +2450,76 @@ function onMessage(event) {
       send({ t: "settings_get" });
       break;
 
+    case "c_ringing":
+      if (activeCall?.state === "outgoing") {
+        activeCall.id = m.call;
+        clearTimeout(callTimer);
+        callTimer = null;
+        renderCallPanel(`Chiamata ${activeCall.video ? "video" : "vocale"} in attesa di risposta...`, [{
+          label: "Annulla",
+          icon: "phone-x",
+          style: "btn-danger",
+          run: endActiveCall,
+        }]);
+      }
+      break;
+
+    case "c_incoming": {
+      if (activeCall) {
+        send({ t: "c_end", call: m.call });
+        break;
+      }
+      const caller = contactProfile(m.from)?.name || m.from;
+      activeCall = { id: m.call, from: m.from, video: !!m.video, state: "incoming" };
+      renderCallPanel(`${caller} ti sta chiamando${m.video ? " in video" : ""}.`, [
+        {
+          label: "Rispondi",
+          icon: "phone",
+          style: "btn-primary",
+          run: acceptCall,
+        },
+        {
+          label: "Rifiuta",
+          icon: "phone-x",
+          style: "btn-danger",
+          run: () => {
+            send({ t: "c_end", call: activeCall?.id });
+            finishCall("Chiamata rifiutata.");
+          },
+        },
+      ]);
+      break;
+    }
+
+    case "c_accepted":
+      if (activeCall?.id === m.call) {
+        activeCall.state = "active";
+        renderCallPanel("Chiamata accettata. Audio/video non disponibile in questa sessione.", [{
+          label: "Termina",
+          icon: "phone-x",
+          style: "btn-danger",
+          run: endActiveCall,
+        }]);
+      }
+      break;
+
+    case "c_ended":
+      if (activeCall?.id === m.call) {
+        const reasons = {
+          no_answer: "Nessuna risposta.",
+          declined: "Chiamata rifiutata.",
+          cancelled: "Chiamata annullata.",
+          dropped: "Connessione alla chiamata interrotta.",
+          ended: "Chiamata terminata.",
+        };
+        finishCall(reasons[m.reason] || "Chiamata terminata.");
+      }
+      break;
+
+    case "c_taken":
+      if (activeCall?.id === m.call) finishCall("La chiamata è stata risposta su un altro dispositivo.");
+      break;
+
     case "community_list":
       communityListData = m.communities || [];
       renderCommunityList(communityListData);
@@ -1879,6 +2564,7 @@ function onMessage(event) {
 
     case "community_invite_accepted":
     case "community_invite_removed":
+      finishInviteResponse();
       pendingInvitations = pendingInvitations.filter(item => item.community !== m.community);
       renderPendingInvitations(pendingInvitations);
       send({ t: "community_list" });
@@ -1890,21 +2576,21 @@ function onMessage(event) {
       break;
 
     case "member_roles_saved":
-      memberActionPending = null;
+      finishMemberAction();
       el("memberInviteFeedback").textContent = "Ruoli aggiornati.";
       el("memberInviteFeedback").className = "member-feedback success";
       send({ t: "community_get", community: m.community });
       break;
 
     case "member_removed":
-      memberActionPending = null;
+      finishMemberAction();
       el("memberInviteFeedback").textContent = "Membro rimosso dalla community.";
       el("memberInviteFeedback").className = "member-feedback success";
       send({ t: "community_get", community: m.community });
       break;
 
     case "member_invite_revoked":
-      memberActionPending = null;
+      finishMemberAction();
       el("memberInviteFeedback").textContent = "Invito revocato.";
       el("memberInviteFeedback").className = "member-feedback success";
       send({ t: "community_get", community: m.community });
@@ -1928,7 +2614,7 @@ function onMessage(event) {
 
     case "member_invited": {
       const feedback = el("memberInviteFeedback");
-      memberActionPending = null;
+      finishMemberAction();
       el("invitePersonBtn").disabled = false;
       el("memberIdentifier").value = "";
       el("clearMemberIdentifier").classList.add("hidden");
@@ -1954,6 +2640,13 @@ function onMessage(event) {
       break;
 
     case "community_created":
+      pendingCommunityCreate = false;
+      clearTimeout(pendingCommunityCreateTimer);
+      pendingCommunityCreateTimer = null;
+      el("createCommunityBtn").disabled = false;
+      el("newCommunityName").value = "";
+      el("communityCreateFeedback").textContent = "Gruppo creato.";
+      el("communityCreateFeedback").className = "inline-action-feedback success";
       selectCommunity(m.id);
       send({ t: "community_list" });
       break;
@@ -1975,6 +2668,10 @@ function onMessage(event) {
     }
 
     case "contact_added":
+      if (quickContactPending) {
+        clearTimeout(quickContactTimer);
+        quickContactTimer = null;
+      }
       quickContactPending = false;
       contacts.push(m.contact);
       renderContacts();
@@ -1988,7 +2685,7 @@ function onMessage(event) {
       break;
 
     case "dm":
-      appendMessage(m.from || m.id, m.text, (m.from || m.id)?.toLowerCase() === me?.id ? "self" : "other", m.ts);
+      appendMessage(m.from || m.id, m.text, (m.from || m.id)?.toLowerCase() === me?.id ? "self" : "other", m.ts, false, m.attachment);
       break;
 
     case "profile":
@@ -2004,6 +2701,11 @@ function onMessage(event) {
         "image/jpeg", "image/png", "image/webp", "image/gif", "video/mp4",
       ].includes(m.mime)) {
         mediaCache.set(m.hash, `data:${m.mime};base64,${m.data}`);
+        messages.querySelectorAll("[data-attachment-hash]").forEach(node => {
+          if (node.dataset.attachmentHash !== m.hash) return;
+          const replacement = renderMessageAttachment({ hash: m.hash, mime: m.mime });
+          if (replacement) node.replaceWith(replacement);
+        });
         renderContacts();
         renderSelectedContact();
         if (currentCommunity) renderParticipants(currentCommunity);
@@ -2012,7 +2714,17 @@ function onMessage(event) {
       break;
 
     case "media_ok":
-      if (me && (m.kind === "avatar" || m.kind === "banner")) {
+      if (m.kind === "attachment" && pendingChatAttachment && attachmentUploadPending) {
+        clearTimeout(attachmentTimer);
+        attachmentTimer = null;
+        attachmentUploadPending = false;
+        pendingChatAttachment.hash = m.hash;
+        pendingChatAttachment.mime = m.mime || pendingChatAttachment.mime;
+        attachButton.disabled = false;
+        renderPendingAttachment();
+        updateSendButton();
+        setComposerFeedback("Allegato pronto. Premi Invia per spedirlo.", "success");
+      } else if (me && (m.kind === "avatar" || m.kind === "banner")) {
         const preview = me[`${m.kind}_preview`];
         if (preview) mediaCache.set(m.hash, preview);
         me = { ...me, [m.kind]: m.hash, [`${m.kind}_type`]: m.extension };
@@ -2025,32 +2737,41 @@ function onMessage(event) {
       break;
 
     case "err":
+      if (pendingCommunityCreate) {
+        pendingCommunityCreate = false;
+        clearTimeout(pendingCommunityCreateTimer);
+        pendingCommunityCreateTimer = null;
+        el("createCommunityBtn").disabled = false;
+        el("communityCreateFeedback").textContent = m.text || "Impossibile creare il gruppo.";
+        el("communityCreateFeedback").className = "inline-action-feedback error";
+        break;
+      }
+      if (pendingInviteResponse) {
+        finishInviteResponse(m.text || "Impossibile rispondere all'invito.", true);
+        break;
+      }
+      if (activeCall && activeCall.state !== "active") {
+        finishCall(m.text || "Impossibile avviare la chiamata.");
+        break;
+      }
+      if (attachmentUploadPending || pendingChatAttachment?.hash) {
+        if (attachmentUploadPending) {
+          discardPendingAttachment();
+        }
+        setComposerFeedback(m.text || "Invio dell'allegato non riuscito.", "error");
+        updateSendButton();
+        break;
+      }
       if (quickContactPending) {
         quickContactPending = false;
+        clearTimeout(quickContactTimer);
+        quickContactTimer = null;
         el("quickContactFeedback").textContent = m.text || "Impossibile aggiungere il contatto.";
         el("quickContactFeedback").className = "error";
         break;
       }
-      if (memberActionPending) {
-        const pending = memberActionPending;
-        memberActionPending = null;
-        const feedback = pending.feedback || el("memberInviteFeedback");
-        feedback.replaceChildren();
-        feedback.textContent = m.text || "Operazione non riuscita.";
-        feedback.className = "member-feedback error";
-        if (/connessione|riprova|timeout|server/i.test(feedback.textContent)) {
-          const retry = document.createElement("button");
-          retry.type = "button";
-          retry.className = "member-retry";
-          retry.textContent = "Riprova";
-          retry.addEventListener("click", pending.retry);
-          feedback.append(" ", retry);
-        }
-        el("invitePersonBtn").disabled = false;
-        if (pending.type === "remove") {
-          const row = participantDirectory.querySelector(".participant-row.removing");
-          row?.classList.remove("removing");
-        }
+      if (memberActionPending || pendingInviteResponse || attachmentUploadPending) {
+        failMemberAction(m.text || "Operazione non riuscita.");
         break;
       }
       if (resumePending) {
@@ -2106,11 +2827,11 @@ function renderHistory(msgs, withUser) {
   if (msgs.length === 0) {
     messages.appendChild(makePlaceholder("Nessun messaggio ancora."));
   }
-  msgs.forEach(m => appendMessage(m.from, m.text, m.from?.toLowerCase() === me?.id ? "self" : "other", m.ts, true));
+  msgs.forEach(m => appendMessage(m.from, m.text, m.from?.toLowerCase() === me?.id ? "self" : "other", m.ts, true, m.attachment));
   scrollBottom();
 }
 
-function appendMessage(from, text, kind, ts, silent) {
+function appendMessage(from, text, kind, ts, silent, attachment = null) {
   const div = document.createElement("div");
   div.className = "msg " + kind;
   const profile = contacts.find(c => (c.id || c.username) === from);
@@ -2122,7 +2843,9 @@ function appendMessage(from, text, kind, ts, silent) {
     styleName(author, profile);
     div.appendChild(author);
   }
-  div.append(document.createTextNode(text || ""));
+  appendRichText(div, text || "");
+  const renderedAttachment = renderMessageAttachment(attachment);
+  if (renderedAttachment) div.appendChild(renderedAttachment);
   const metadata = document.createElement("span");
   metadata.className = "meta";
   metadata.textContent = meta;

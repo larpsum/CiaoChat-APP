@@ -78,6 +78,7 @@
       <div class="inline-contact-add">
         <input id="newCommunityName" type="text" maxlength="64" placeholder="Nome del gruppo" aria-label="Nome del nuovo gruppo">
         <button class="icon-btn" id="createCommunityBtn" type="button" aria-label="Crea gruppo"><i class="ph ph-plus" aria-hidden="true"></i></button>
+        <div id="communityCreateFeedback" class="inline-action-feedback" role="status" aria-live="polite"></div>
       </div>
       <div class="search-wrap">
         <input type="text" id="contactSearch" placeholder="Cerca contatti">
@@ -110,11 +111,17 @@
           <div class="conv-status" id="convStatus">Seleziona una conversazione</div>
         </div>
         <div class="conv-actions">
-          <button class="icon-btn" id="profileSettingsHeaderBtn" title="Impostazioni" aria-label="Impostazioni"><i class="ph ph-gear" aria-hidden="true"></i></button>
-          <button class="icon-btn" id="microphoneButton" title="Microfono" aria-label="Microfono"><i class="ph ph-microphone" aria-hidden="true"></i></button>
-          <button class="icon-btn" id="callButton" title="Videochiamata" aria-label="Videochiamata"><i class="ph ph-video-camera" aria-hidden="true"></i></button>
+          <button class="icon-btn" id="profileSettingsHeaderBtn" type="button" title="Impostazioni" aria-label="Impostazioni"><i class="ph ph-gear" aria-hidden="true"></i></button>
+          <button class="icon-btn" id="searchButton" type="button" title="Cerca" aria-label="Cerca"><i class="ph ph-magnifying-glass" aria-hidden="true"></i></button>
+          <button class="icon-btn" id="microphoneButton" type="button" title="Test microfono" aria-label="Test microfono"><i class="ph ph-microphone" aria-hidden="true"></i></button>
+          <button class="icon-btn" id="voiceCallButton" type="button" title="Chiamata vocale" aria-label="Chiamata vocale"><i class="ph ph-phone" aria-hidden="true"></i></button>
+          <button class="icon-btn" id="callButton" type="button" title="Videochiamata" aria-label="Videochiamata"><i class="ph ph-video-camera" aria-hidden="true"></i></button>
         </div>
       </header>
+      <section class="call-panel hidden" id="callPanel" aria-live="polite">
+        <span id="callStatus"></span>
+        <div id="callActions"></div>
+      </section>
       <nav class="community-channel-bar hidden" id="communityChannelBar" aria-label="Canali"></nav>
 
       <!-- Messages -->
@@ -128,14 +135,19 @@
       <!-- Composer -->
       <div class="composer">
         <div class="composer-inner">
-          <button class="icon-btn add" title="Allega"><i class="ph ph-paperclip" aria-hidden="true"></i></button>
-          <button class="icon-btn composer-tool" title="Emoji"><i class="ph ph-smiley" aria-hidden="true"></i></button>
-          <button class="icon-btn composer-tool" title="Grassetto"><i class="ph ph-text-b" aria-hidden="true"></i></button>
-          <button class="icon-btn composer-tool" title="Corsivo"><i class="ph ph-text-italic" aria-hidden="true"></i></button>
-          <button class="icon-btn composer-tool" title="Link"><i class="ph ph-link" aria-hidden="true"></i></button>
-          <button class="icon-btn composer-tool" title="Menziona"><i class="ph ph-at" aria-hidden="true"></i></button>
-          <input type="text" id="messageInput" placeholder="Scrivi un messaggio..." autocomplete="off">
-          <button class="btn btn-primary btn-sm" id="sendBtn" disabled><i class="ph ph-paper-plane-tilt" aria-hidden="true"></i><span>Invia</span></button>
+          <input id="attachmentInput" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4" hidden>
+          <button class="icon-btn add" id="attachButton" type="button" title="Allega immagine o video" aria-label="Allega immagine o video"><i class="ph ph-paperclip" aria-hidden="true"></i></button>
+          <button class="icon-btn composer-tool" id="emojiButton" type="button" title="Emoji" aria-label="Inserisci emoji" aria-expanded="false"><i class="ph ph-smiley" aria-hidden="true"></i></button>
+          <button class="icon-btn composer-tool" id="boldButton" type="button" title="Grassetto" aria-label="Grassetto"><i class="ph ph-text-b" aria-hidden="true"></i></button>
+          <button class="icon-btn composer-tool" id="italicButton" type="button" title="Corsivo" aria-label="Corsivo"><i class="ph ph-text-italic" aria-hidden="true"></i></button>
+          <button class="icon-btn composer-tool" id="linkButton" type="button" title="Inserisci link" aria-label="Inserisci link"><i class="ph ph-link" aria-hidden="true"></i></button>
+          <button class="icon-btn composer-tool" id="mentionButton" type="button" title="Menziona" aria-label="Menziona partecipante"><i class="ph ph-at" aria-hidden="true"></i></button>
+          <input type="text" id="messageInput" placeholder="Scrivi un messaggio..." autocomplete="off" disabled>
+          <button class="btn btn-primary btn-sm" id="sendBtn" type="button" disabled><i class="ph ph-paper-plane-tilt" aria-hidden="true"></i><span>Invia</span></button>
+          <div class="composer-inline-panel hidden" id="emojiPicker" role="group" aria-label="Emoji"></div>
+          <div class="composer-inline-panel hidden" id="mentionPicker" role="group" aria-label="Menziona partecipante"></div>
+          <div class="attachment-preview hidden" id="attachmentPreview"></div>
+          <div class="composer-feedback" id="composerFeedback" role="status" aria-live="polite"></div>
         </div>
       </div>
     </section>
@@ -152,7 +164,7 @@
         <button type="button" id="refreshParticipantsBtn"><i class="ph ph-arrows-clockwise" aria-hidden="true"></i> Aggiorna directory</button>
         <button type="button" id="openGroupSettingsBtn"><i class="ph ph-gear" aria-hidden="true"></i> Impostazioni gruppo</button>
       </div>
-      <button class="participant-index-toggle" id="participantIndexToggle" type="button" aria-expanded="true">
+      <button class="participant-index-toggle" id="participantIndexToggle" type="button" aria-expanded="true" aria-controls="participantIndex">
         <span><i class="ph ph-caret-down" id="participantIndexChevron" aria-hidden="true"></i><strong id="participantIndexTitle">Participants - Select a group</strong></span>
         <span class="participant-count" id="participantCount">0</span>
       </button>

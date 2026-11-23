@@ -598,11 +598,13 @@ def handle_add_contact(conn, m):
     conn.send({"t": "contact_added", "contact": public_profile(target)})
 
 
-def store_message(frm, to, text, voice=None):
+def store_message(frm, to, text, voice=None, attachment=None):
     """Salva un messaggio su Firebase e lo recapita a tutti i dispositivi dei due utenti."""
     msg = {"from": frm, "to": to, "text": text, "ts": now()}
     if voice:
         msg["voice"] = voice
+    if attachment:
+        msg["attachment"] = attachment
     pushed = firebase_ref(f"messages/{pair_key(frm, to)}").push(msg)
     out = dict(msg, t="dm", id=pushed.key)
     send_to(frm, out)
@@ -624,14 +626,41 @@ def clean_voice(v):
     return {"hash": h, "dur": round(max(0.0, min(float(dur), 60.0)), 1)}
 
 
+def clean_attachment(value):
+    if not isinstance(value, dict):
+        return None
+    media_hash = value.get("hash")
+    if (not isinstance(media_hash, str) or not HASH_RE.fullmatch(media_hash)
+            or not os.path.exists(media_path(media_hash))):
+        return None
+    try:
+        with open(media_path(media_hash), "rb") as media_file:
+            data = media_file.read(MAX_PROFILE_MEDIA + 1)
+    except OSError:
+        return None
+    if len(data) > MAX_PROFILE_MEDIA:
+        return None
+    mime = profile_media_mime(data)
+    if mime not in PROFILE_MEDIA_MIMES.values():
+        return None
+    name = str(value.get("name", "")).replace("\\", "/").split("/")[-1]
+    name = re.sub(r"[\x00-\x1f\x7f]", "", name).strip()[:128]
+    if not name:
+        return None
+    return {"hash": media_hash, "name": name, "mime": mime, "size": len(data)}
+
+
 def handle_dm(conn, m):
     to = str(m.get("to", "")).strip().lower()
     text = str(m.get("text", "")).strip()[:MAX_TEXT]
     voice = clean_voice(m.get("voice"))
+    attachment = clean_attachment(m.get("attachment"))
+    if m.get("attachment") is not None and attachment is None:
+        return conn.send({"t": "err", "text": "Allegato non valido o non più disponibile."})
     if voice and not text:
         text = "\U0001F3A4 Messaggio vocale"
     target_rec = fb_get(f"users/{to}")
-    if not text or to == conn.user or not isinstance(target_rec, dict):
+    if (not text and not voice and not attachment) or to == conn.user or not isinstance(target_rec, dict):
         return
     if is_blocked(conn.user, to):
         return conn.send({"t": "err", "text": "Non puoi inviare messaggi a questo utente."})
@@ -641,7 +670,7 @@ def handle_dm(conn, m):
         return conn.send({"t": "err", "text": "Questo utente accetta messaggi solo dai contatti."})
     if dm_policy == "friends_group" and not is_friend and not share_community(conn.user, to):
         return conn.send({"t": "err", "text": "Questo utente accetta messaggi solo da contatti o membri degli stessi gruppi."})
-    store_message(conn.user, to, text, voice)
+    store_message(conn.user, to, text, voice, attachment)
 
 
 def handle_history(conn, m):
@@ -2097,6 +2126,9 @@ def handle_community_channel_send(conn, m):
     community_id = valid_community_id(m.get("community"))
     channel_id = valid_community_id(m.get("channel"))
     text = str(m.get("text", "")).strip()[:MAX_TEXT]
+    attachment = clean_attachment(m.get("attachment"))
+    if m.get("attachment") is not None and attachment is None:
+        return conn.send({"t": "err", "text": "Allegato non valido o non più disponibile."})
     if not community_id or not channel_id:
         return
     permissions = require_community_permission(conn, community_id, "view_channels", channel_id)
@@ -2104,7 +2136,7 @@ def handle_community_channel_send(conn, m):
         return
     if not permissions.get("send_messages") and not permissions.get("administrator"):
         return conn.send({"t": "err", "text": "Non puoi inviare messaggi in questo canale."})
-    if not text:
+    if not text and not attachment:
         return
     channel = fb_get(f"communities/{community_id}/channels/{channel_id}")
     if not isinstance(channel, dict):
@@ -2137,6 +2169,8 @@ def handle_community_channel_send(conn, m):
     message = {
         "from": conn.user, "text": text, "timestamp": now(),
     }
+    if attachment:
+        message["attachment"] = attachment
     message_id = firebase_ref(f"communities/{community_id}/messages/{channel_id}").push(message).key
     payload = {"t": "community_message", "community": community_id, "channel": channel_id,
                "message": dict(message, id=message_id)}
@@ -2268,7 +2302,7 @@ def handle_media(conn, m):
             return
         if not community_record(community_id):
             return conn.send({"t": "err", "text": "Gruppo non trovato."})
-    elif kind not in ("avatar", "banner", "voice"):
+    elif kind not in ("avatar", "banner", "voice", "attachment"):
         return conn.send({"t": "err", "text": "Tipo di file non supportato."})
     try:
         data = base64.b64decode(str(m.get("data", "")), validate=True)
@@ -2298,7 +2332,8 @@ def handle_media(conn, m):
         conn.send({"t": "media_ok", "kind": kind, "hash": h, "extension": extension})
         send_community_snapshot(conn, community_id)
     else:
-        conn.send({"t": "media_ok", "kind": kind, "hash": h})
+        conn.send({"t": "media_ok", "kind": kind, "hash": h,
+                   "mime": profile_media_mime(data) if kind == "attachment" else None})
 
 
 def handle_clear_media(conn, m):
