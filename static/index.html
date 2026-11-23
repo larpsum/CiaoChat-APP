@@ -100,12 +100,13 @@
     <section class="conversation">
       <!-- Header -->
       <header class="conv-header">
-        <div class="conv-banner-layer" id="convBanner"></div>
-        <div class="conv-avatar" id="convAvatar">?</div>
-        <div class="conv-info">
-          <div class="conv-name name-style" id="convName">Scegli un contatto</div>
-          <div class="conv-status" id="convStatus">Seleziona una conversazione</div>
-        </div>
+        <button class="conv-profile-button" id="openContactProfile" type="button" aria-label="Apri il profilo del contatto" disabled>
+          <div class="conv-avatar" id="convAvatar">?</div>
+          <div class="conv-info">
+            <div class="conv-name name-style" id="convName">Scegli un contatto</div>
+            <div class="conv-status" id="convStatus">Seleziona una conversazione</div>
+          </div>
+        </button>
         <div class="conv-actions">
           <button class="icon-btn" id="profileSettingsHeaderBtn" type="button" title="Impostazioni" aria-label="Impostazioni"><i class="ph ph-gear" aria-hidden="true"></i></button>
           <button class="icon-btn" id="searchButton" type="button" title="Cerca" aria-label="Cerca"><i class="ph ph-magnifying-glass" aria-hidden="true"></i></button>
@@ -196,6 +197,43 @@
   </div>
 </div>
 
+<div class="contact-profile-modal hidden" id="contactProfileModal" role="dialog" aria-modal="true" aria-labelledby="contactProfileName">
+  <div class="contact-profile-dialog">
+    <div class="contact-profile-banner" id="contactProfileBanner"></div>
+    <div class="contact-profile-badges" id="contactProfileBadges" aria-label="Badge account"></div>
+    <button class="icon-btn contact-profile-close" id="closeContactProfile" type="button" aria-label="Chiudi profilo"><i class="ph ph-x" aria-hidden="true"></i></button>
+    <div class="contact-profile-content">
+      <div class="contact-profile-avatar-wrap">
+        <div class="contact-profile-avatar" id="contactProfileAvatar">?</div>
+        <span class="contact-profile-presence" id="contactProfilePresence" aria-label="Offline"></span>
+      </div>
+      <section class="contact-profile-panel">
+        <h2 class="name-style" id="contactProfileName"></h2>
+        <p class="contact-profile-username" id="contactProfileUsername"></p>
+        <p class="contact-profile-status" id="contactProfileStatus"></p>
+        <div class="contact-profile-divider"></div>
+        <section class="contact-profile-section hidden" id="contactProfileAboutSection">
+          <h3>CHI SONO</h3>
+          <p class="contact-profile-bio" id="contactProfileBio"></p>
+        </section>
+        <section class="contact-profile-section hidden" id="contactProfileDatesSection">
+          <h3>MEMBRO DAL</h3>
+          <div class="contact-profile-dates" id="contactProfileDates"></div>
+        </section>
+        <section class="contact-profile-section hidden" id="contactProfileRolesSection">
+          <h3>RUOLI</h3>
+          <div class="contact-profile-roles" id="contactProfileRoles"></div>
+        </section>
+        <p class="contact-profile-error" id="contactProfileError" role="status" aria-live="polite"></p>
+      </section>
+      <form class="contact-profile-message" id="contactProfileMessageForm">
+        <input id="contactProfileMessageInput" type="text" maxlength="2000" placeholder="Messaggia" aria-label="Messaggio rapido">
+        <button type="submit" aria-label="Invia messaggio"><i class="ph ph-paper-plane-tilt" aria-hidden="true"></i></button>
+      </form>
+    </div>
+  </div>
+</div>
+
 <div class="profile-modal hidden" id="profileModal" role="dialog" aria-modal="true" aria-labelledby="profileModalTitle">
   <div class="settings-dialog">
     <aside class="settings-sidebar">
@@ -221,7 +259,6 @@
         <section class="settings-panel active" data-settings-panel="account">
           <h3>Account &amp; Profilo</h3>
           <div class="profile-preview settings-profile-preview">
-            <div class="profile-preview-banner" id="profilePreviewBanner"></div>
             <div class="profile-preview-user">
               <div class="profile-preview-avatar" id="profilePreviewAvatar">?</div>
               <span class="name-style" id="profilePreviewName">Il tuo nome</span>

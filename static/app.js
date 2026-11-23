@@ -38,6 +38,8 @@ let pendingChatAttachment = null;
 let attachmentUploadPending = false;
 let attachmentTimer = null;
 let activeCall = null;
+let profileBeingViewed = null;
+let requestedProfileId = null;
 let pendingCommunityCreate = false;
 let pendingInviteResponse = null;
 let pendingInviteResponseTimer = null;
@@ -145,6 +147,8 @@ function send(obj) {
   if (!profileModal.classList.contains("hidden")) {
     profileStatus.textContent = "Connessione al server non disponibile. Riprova tra qualche secondo.";
     profileStatus.className = "error";
+  } else if (!contactProfileModal.classList.contains("hidden")) {
+    contactProfileError.textContent = "Connessione al server non disponibile. Riprova tra qualche secondo.";
   } else if (authShell.style.display !== "none") {
     setAuthMsg("Connessione al server non disponibile. Riprova tra qualche secondo.");
   }
@@ -229,7 +233,23 @@ const contactList = el("contactList");
 const convAvatar = el("convAvatar");
 const convName = el("convName");
 const convStatus = el("convStatus");
-const convBanner = el("convBanner");
+const openContactProfileButton = el("openContactProfile");
+const contactProfileModal = el("contactProfileModal");
+const contactProfileBanner = el("contactProfileBanner");
+const contactProfileAvatar = el("contactProfileAvatar");
+const contactProfilePresence = el("contactProfilePresence");
+const contactProfileName = el("contactProfileName");
+const contactProfileUsername = el("contactProfileUsername");
+const contactProfileStatus = el("contactProfileStatus");
+const contactProfileBio = el("contactProfileBio");
+const contactProfileError = el("contactProfileError");
+const contactProfileBadges = el("contactProfileBadges");
+const contactProfileAboutSection = el("contactProfileAboutSection");
+const contactProfileDatesSection = el("contactProfileDatesSection");
+const contactProfileDates = el("contactProfileDates");
+const contactProfileRolesSection = el("contactProfileRolesSection");
+const contactProfileRoles = el("contactProfileRoles");
+const contactProfileMessageInput = el("contactProfileMessageInput");
 const messages = el("messages");
 const messageInput = el("messageInput");
 const sendBtn = el("sendBtn");
@@ -243,7 +263,6 @@ const profileStatus = el("profileStatus");
 const nameColor = el("nameColor");
 const nameAnimation = el("nameAnimation");
 const profilePreviewAvatar = el("profilePreviewAvatar");
-const profilePreviewBanner = el("profilePreviewBanner");
 const profilePreviewName = el("profilePreviewName");
 const participantSearch = el("participantSearch");
 const participantDirectory = el("participantDirectory");
@@ -336,6 +355,7 @@ function selectCommunity(communityId) {
   currentCommunity = null;
   currentChannelId = null;
   selectedContact = null;
+  openContactProfileButton.disabled = true;
   pendingGroupSelection = true;
   selectedInviteRoles.clear();
   renderContacts();
@@ -1059,6 +1079,7 @@ function selectContact(username) {
   el("communityChannelBar").classList.add("hidden");
   renderCommunityList(communityListData);
   selectedContact = username;
+  openContactProfileButton.disabled = false;
   convStatus.textContent = username;
   renderSelectedContact();
   renderContacts();
@@ -1083,9 +1104,6 @@ function renderSelectedContact() {
   convAvatar.textContent = avatarInitial(name);
   const avatar = profile && mediaElement(profile.avatar, "conv-avatar-media");
   if (avatar) convAvatar.replaceChildren(avatar);
-  convBanner.replaceChildren();
-  const banner = profile && mediaElement(profile.banner, "conv-banner-media");
-  if (banner) convBanner.appendChild(banner);
 }
 
 function styleName(node, profile) {
@@ -1113,6 +1131,124 @@ function makeAvatar(profile, className) {
   const image = mediaElement(profile.avatar, "avatar-media");
   if (image) avatar.replaceChildren(image);
   return avatar;
+}
+
+function renderContactProfile() {
+  const profile = profileBeingViewed;
+  if (!profile) return;
+  contactProfileAvatar.replaceChildren();
+  contactProfileAvatar.textContent = avatarInitial(profile.name || profile.username || profile.id);
+  const avatar = mediaElement(profile.avatar, "avatar-media");
+  if (avatar) contactProfileAvatar.replaceChildren(avatar);
+
+  contactProfileBanner.replaceChildren();
+  const banner = mediaElement(profile.banner, "contact-profile-banner-media");
+  if (banner) contactProfileBanner.appendChild(banner);
+
+  contactProfileName.textContent = profile.name || profile.username || profile.id;
+  styleName(contactProfileName, profile);
+  const username = profile.username || profile.id;
+  contactProfileUsername.textContent = `@${username}${profile.pronouns ? ` | ${profile.pronouns}` : ""}`;
+  const online = profile.online === true;
+  contactProfilePresence.classList.toggle("online", online);
+  contactProfilePresence.setAttribute("aria-label", online ? "Online" : "Offline");
+
+  const customStatus = profile.custom_status && typeof profile.custom_status === "object"
+    ? profile.custom_status : {};
+  const statusText = typeof profile.status === "string" ? profile.status : customStatus.text;
+  contactProfileStatus.replaceChildren();
+  if (statusText) {
+    if (customStatus.emoji) {
+      const emoji = document.createElement("span");
+      emoji.className = "contact-profile-status-emoji";
+      emoji.textContent = customStatus.emoji;
+      contactProfileStatus.appendChild(emoji);
+    }
+    contactProfileStatus.append(document.createTextNode(statusText));
+  }
+
+  contactProfileBio.textContent = profile.bio || "";
+  contactProfileAboutSection.classList.toggle("hidden", !profile.bio);
+  renderContactProfileDates(profile);
+  renderContactProfileBadges(profile.badges);
+  renderContactProfileRoles(profile.roles);
+  contactProfileMessageInput.placeholder = `Messaggia @${username}`;
+}
+
+function renderContactProfileBadges(badges) {
+  contactProfileBadges.replaceChildren();
+  if (!Array.isArray(badges)) return;
+  badges.forEach(badge => {
+    const label = typeof badge === "string" ? badge : badge?.label;
+    if (!label || typeof label !== "string") return;
+    const pill = document.createElement("span");
+    pill.className = "contact-profile-badge";
+    pill.textContent = label;
+    contactProfileBadges.appendChild(pill);
+  });
+}
+
+function renderContactProfileDates(profile) {
+  contactProfileDates.replaceChildren();
+  const dates = [
+    ["Account", profile.created],
+    ["Server", profile.joined],
+  ].filter(([, timestamp]) => Number.isFinite(Number(timestamp)) && Number(timestamp) > 0);
+  dates.forEach(([label, timestamp]) => {
+    const item = document.createElement("div");
+    item.className = "contact-profile-date";
+    const date = document.createElement("strong");
+    date.textContent = new Intl.DateTimeFormat("it-IT", {
+      day: "numeric", month: "short", year: "numeric",
+    }).format(new Date(Number(timestamp) * 1000));
+    const caption = document.createElement("span");
+    caption.textContent = label;
+    item.append(date, caption);
+    contactProfileDates.appendChild(item);
+  });
+  contactProfileDatesSection.classList.toggle("hidden", dates.length === 0);
+}
+
+function renderContactProfileRoles(roles) {
+  contactProfileRoles.replaceChildren();
+  if (!Array.isArray(roles)) {
+    contactProfileRolesSection.classList.add("hidden");
+    return;
+  }
+  roles.forEach(role => {
+    const label = typeof role === "string" ? role : role?.name;
+    if (!label || typeof label !== "string") return;
+    const pill = document.createElement("span");
+    pill.className = "contact-profile-role";
+    pill.textContent = label;
+    if (typeof role === "object" && /^#[0-9a-f]{6}$/i.test(role.color || "")) {
+      pill.style.setProperty("--role-color", role.color);
+    }
+    contactProfileRoles.appendChild(pill);
+  });
+  contactProfileRolesSection.classList.toggle("hidden", contactProfileRoles.childElementCount === 0);
+}
+
+function openContactProfile() {
+  if (!selectedContact || currentCommunityId) return;
+  requestedProfileId = selectedContact;
+  profileBeingViewed = contactProfile(selectedContact) || {
+    id: selectedContact,
+    username: selectedContact,
+    name: selectedContact,
+  };
+  contactProfileError.textContent = "";
+  renderContactProfile();
+  contactProfileModal.classList.remove("hidden");
+  send({ t: "profile", user: selectedContact });
+  contactProfileMessageInput.focus();
+}
+
+function closeContactProfile() {
+  requestedProfileId = null;
+  profileBeingViewed = null;
+  contactProfileModal.classList.add("hidden");
+  openContactProfileButton.focus();
 }
 
 function mediaElement(hash, className, previewSrc = null) {
@@ -1147,9 +1283,6 @@ function renderProfilePreview() {
   profilePreviewAvatar.textContent = avatarInitial(me?.username);
   const avatar = mediaElement(me?.avatar, "avatar-media", me?.avatar_preview);
   if (avatar) profilePreviewAvatar.replaceChildren(avatar);
-  profilePreviewBanner.replaceChildren();
-  const banner = mediaElement(me?.banner, "preview-banner-media", me?.banner_preview);
-  if (banner) profilePreviewBanner.appendChild(banner);
   nameColor.value = me?.name_color || "#f1f5f9";
   nameAnimation.value = me?.name_animation || "none";
 }
@@ -1819,6 +1952,26 @@ function uploadProfileMedia(kind, file) {
 
 el("profileSettingsBtn").addEventListener("click", openProfileModal);
 el("profileSettingsHeaderBtn").addEventListener("click", openProfileModal);
+openContactProfileButton.addEventListener("click", openContactProfile);
+el("closeContactProfile").addEventListener("click", closeContactProfile);
+el("contactProfileMessageForm").addEventListener("submit", event => {
+  event.preventDefault();
+  const text = contactProfileMessageInput.value.trim();
+  const recipient = profileBeingViewed?.id;
+  if (!text || !recipient) return;
+  if (send({ t: "dm", to: recipient, text })) {
+    contactProfileMessageInput.value = "";
+    contactProfileError.textContent = "";
+  }
+});
+contactProfileModal.addEventListener("click", event => {
+  if (event.target === contactProfileModal) closeContactProfile();
+});
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape" && !contactProfileModal.classList.contains("hidden")) {
+    closeContactProfile();
+  }
+});
 el("closeProfileModal").addEventListener("click", closeProfileModal);
 profileModal.addEventListener("click", event => {
   if (event.target === profileModal) closeProfileModal();
@@ -2715,10 +2868,19 @@ function onMessage(event) {
       break;
 
     case "profile":
+      if (m.profile?.id === requestedProfileId) {
+        profileBeingViewed = m.profile;
+        requestedProfileId = null;
+        renderContactProfile();
+      }
       break;
 
     case "profile_update":
       updateProfile(m.profile);
+      if (profileBeingViewed?.id === m.profile?.id) {
+        profileBeingViewed = { ...profileBeingViewed, ...m.profile };
+        renderContactProfile();
+      }
       break;
 
     case "media":
@@ -2734,6 +2896,7 @@ function onMessage(event) {
         });
         renderContacts();
         renderSelectedContact();
+        if (!contactProfileModal.classList.contains("hidden")) renderContactProfile();
         if (currentCommunity) renderParticipants(currentCommunity);
         if (!profileModal.classList.contains("hidden")) renderProfilePreview();
       }
@@ -2763,6 +2926,15 @@ function onMessage(event) {
       break;
 
     case "err":
+      if (requestedProfileId && !contactProfileModal.classList.contains("hidden")) {
+        contactProfileError.textContent = m.text || "Impossibile caricare il profilo.";
+        requestedProfileId = null;
+        break;
+      }
+      if (!contactProfileModal.classList.contains("hidden")) {
+        contactProfileError.textContent = m.text || "Operazione non riuscita.";
+        break;
+      }
       if (pendingCommunityCreate) {
         pendingCommunityCreate = false;
         clearTimeout(pendingCommunityCreateTimer);
@@ -2831,6 +3003,11 @@ function onMessage(event) {
           person.id === m.id ? { ...person, online: m.online } : person
         );
         renderParticipants(currentCommunity);
+      }
+      if (profileBeingViewed?.id === m.id) {
+        profileBeingViewed = { ...profileBeingViewed, online: m.online };
+        contactProfilePresence.classList.toggle("online", m.online === true);
+        contactProfilePresence.setAttribute("aria-label", m.online ? "Online" : "Offline");
       }
       break;
 

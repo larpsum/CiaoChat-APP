@@ -372,9 +372,14 @@ def public_profile(key):
         fb_update(f"users/{key}", {"status": None, "status_expires": None, "custom_status": None})
         rec["status"] = None
         rec["status_expires"] = None
+        rec["custom_status"] = None
     status = rec.get("status")
     return {"id": key, "name": rec.get("display_name") or rec.get("username", key),
             "username": rec.get("username", key), "bio": rec.get("bio", ""), "status": status,
+            "custom_status": rec.get("custom_status", {
+                "text": status or "", "emoji": "", "expires_at": rec.get("status_expires"),
+            }),
+            "created": rec.get("created"),
             "avatar": rec.get("avatar"),
             "avatar_type": rec.get("avatar_type"), "banner": rec.get("banner"),
             "banner_type": rec.get("banner_type"), "name_color": rec.get("name_color", "#f1f5f9"),
