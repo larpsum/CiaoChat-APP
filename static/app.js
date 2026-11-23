@@ -622,6 +622,7 @@ function selectCommunityChannel(channelId) {
   if (!currentCommunity || !currentCommunity.channels?.some(channel => channel.id === channelId)) return;
   discardPendingAttachment();
   currentChannelId = channelId;
+  clearUnread(`cmsg:${currentCommunityId}:${channelId}`);
   const channel = currentCommunity.channels.find(item => item.id === channelId);
   convStatus.textContent = `# ${channel.name}`;
   el("communityChannelBar").querySelectorAll(".community-channel-button").forEach(button => {
@@ -649,12 +650,16 @@ function appendRichText(parent, text) {
     const index = match.index ?? 0;
     if (index > cursor) content.appendChild(document.createTextNode(value.slice(cursor, index)));
     if (match[1]) {
-      const link = document.createElement("a");
-      link.href = match[2];
-      link.target = "_blank";
-      link.rel = "noopener noreferrer";
-      link.textContent = match[1];
-      content.appendChild(link);
+      if (!localSettings.linkPreviews) {
+        content.appendChild(document.createTextNode(match[1]));
+      } else {
+        const link = document.createElement("a");
+        link.href = match[2];
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.textContent = match[1];
+        content.appendChild(link);
+      }
     } else if (match[3]) {
       const strong = document.createElement("strong");
       strong.textContent = match[3];
@@ -664,12 +669,16 @@ function appendRichText(parent, text) {
       emphasis.textContent = match[4];
       content.appendChild(emphasis);
     } else {
-      const link = document.createElement("a");
-      link.href = match[5];
-      link.target = "_blank";
-      link.rel = "noopener noreferrer";
-      link.textContent = match[5];
-      content.appendChild(link);
+      if (!localSettings.linkPreviews) {
+        content.appendChild(document.createTextNode(match[5]));
+      } else {
+        const link = document.createElement("a");
+        link.href = match[5];
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.textContent = match[5];
+        content.appendChild(link);
+      }
     }
     cursor = index + match[0].length;
   }
@@ -679,6 +688,7 @@ function appendRichText(parent, text) {
 }
 
 function renderEmoji(element) {
+  if (!localSettings.autoEmoji) return;
   if (!window.twemoji || !element) return;
   window.twemoji.parse(element, {
     className: "chat-emoji",
@@ -713,6 +723,14 @@ function renderMessageAttachment(attachment) {
       }
     });
     return load;
+  }
+  if (!localSettings.inlineImages && String(attachment.mime || "").startsWith("image/")) {
+    const download = document.createElement("a");
+    download.className = "message-attachment-download";
+    download.href = source;
+    download.download = attachment.name || "allegato";
+    download.innerHTML = `<i class="ph ph-download-simple" aria-hidden="true"></i> ${escapeHtml(attachment.name || "Immagine")}`;
+    return download;
   }
   const media = source.startsWith("data:video/")
     ? document.createElement("video") : document.createElement("img");
@@ -974,13 +992,378 @@ function renderCallPanel(message, actions = []) {
 }
 
 function finishCall(message = "") {
+  cleanupCall();
   clearTimeout(callTimer);
   callTimer = null;
   activeCall = null;
   renderCallPanel(message);
+  el("callMedia").classList.add("hidden");
+  el("callMedia").replaceChildren();
   if (message) {
     callTimer = setTimeout(() => renderCallPanel(""), 5000);
   }
+}
+
+/* ============================ WebRTC call engine ============================ */
+
+let peer = null;
+let localStream = null;
+let remoteStream = null;
+let callStartedAt = 0;
+let callTicker = null;
+let callMuted = false;
+let callDeafened = false;
+let callCameraOn = true;
+let pttHeld = false;
+let voiceGate = true;
+let vadAnimation = null;
+let callAudioCtx = null;
+let callGainNode = null;
+let remoteAudioEl = null;
+let remoteVideoEl = null;
+let localVideoEl = null;
+let signalChain = Promise.resolve();
+
+const RTC_CONFIG = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+
+function callMediaConstraints(video) {
+  const audio = {
+    echoCancellation: !!localSettings.echoCancel,
+    noiseSuppression: !!localSettings.noiseSuppress,
+    autoGainControl: !!localSettings.autoGain,
+  };
+  if (localSettings.audioInput) audio.deviceId = { ideal: localSettings.audioInput };
+  const constraints = { audio, video: false };
+  if (video) {
+    constraints.video = localSettings.videoInput
+      ? { deviceId: { ideal: localSettings.videoInput }, width: { ideal: 1280 }, height: { ideal: 720 } }
+      : { width: { ideal: 1280 }, height: { ideal: 720 } };
+  }
+  return constraints;
+}
+
+function ensureCallAudioCtx() {
+  if (!callAudioCtx) {
+    callAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (callAudioCtx.state === "suspended") callAudioCtx.resume();
+  return callAudioCtx;
+}
+
+function micShouldTransmit() {
+  if (callMuted) return false;
+  if (localSettings.inputMode === "ptt") return pttHeld;
+  return voiceGate;
+}
+
+function applyMicState() {
+  if (!localStream) return;
+  const track = localStream.getAudioTracks()[0];
+  if (track) track.enabled = micShouldTransmit();
+}
+
+function setCallMuted(muted) {
+  callMuted = muted;
+  applyMicState();
+  playSound("mute");
+  renderCallControls();
+}
+
+function setCallDeafened(deafened) {
+  callDeafened = deafened;
+  if (remoteAudioEl) remoteAudioEl.muted = deafened;
+  playSound("mute");
+  renderCallControls();
+}
+
+function toggleCallCamera() {
+  callCameraOn = !callCameraOn;
+  if (localStream) {
+    localStream.getVideoTracks().forEach(track => { track.enabled = callCameraOn; });
+  }
+  renderCallControls();
+}
+
+function applyCallAudioSettings() {
+  if (callGainNode) {
+    callGainNode.gain.value = Math.max(0, Math.min(1, localSettings.inputVolume / 100));
+  }
+  if (remoteAudioEl) {
+    remoteAudioEl.volume = Math.max(0, Math.min(1, localSettings.outputVolume / 100));
+    if (localSettings.audioOutput && typeof remoteAudioEl.setSinkId === "function") {
+      remoteAudioEl.setSinkId(localSettings.audioOutput).catch(() => {});
+    }
+  }
+}
+
+async function acquireLocalMedia(video) {
+  localStream = await navigator.mediaDevices.getUserMedia(callMediaConstraints(video));
+  // Input volume via a GainNode -> MediaStreamDestination replacement track.
+  const inputVol = Math.max(0, Math.min(1, localSettings.inputVolume / 100));
+  const audioTrack = localStream.getAudioTracks()[0];
+  if (audioTrack && inputVol !== 1) {
+    try {
+      const ctx = ensureCallAudioCtx();
+      const source = ctx.createMediaStreamSource(new MediaStream([audioTrack]));
+      callGainNode = ctx.createGain();
+      callGainNode.gain.value = inputVol;
+      const dest = ctx.createMediaStreamDestination();
+      source.connect(callGainNode);
+      callGainNode.connect(dest);
+      const processed = dest.stream.getAudioTracks()[0];
+      localStream.removeTrack(audioTrack);
+      localStream.addTrack(processed);
+      audioTrack.stop();
+    } catch {
+      callGainNode = null;
+    }
+  }
+  applyMicState();
+  startVoiceActivityGate();
+}
+
+function startVoiceActivityGate() {
+  stopVoiceActivityGate();
+  if (localSettings.inputMode !== "voice" || !localStream) return;
+  const track = localStream.getAudioTracks()[0];
+  if (!track) return;
+  try {
+    const ctx = ensureCallAudioCtx();
+    const source = ctx.createMediaStreamSource(new MediaStream([track]));
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    source.connect(analyser);
+    const buf = new Uint8Array(analyser.fftSize);
+    const sensitivity = Math.max(0, Math.min(100, Number(localSettings.voiceSensitivity) || 50));
+    // Higher sensitivity -> lower threshold.
+    const threshold = 0.004 + ((100 - sensitivity) / 100) * 0.12;
+    const tick = () => {
+      if (!localStream) { vadAnimation = null; return; }
+      analyser.getByteTimeDomainData(buf);
+      let sum = 0;
+      for (const v of buf) { const d = (v - 128) / 128; sum += d * d; }
+      const rms = Math.sqrt(sum / buf.length);
+      const gate = rms > threshold;
+      if (gate !== voiceGate) {
+        voiceGate = gate;
+        applyMicState();
+      }
+      vadAnimation = requestAnimationFrame(tick);
+    };
+    vadAnimation = requestAnimationFrame(tick);
+  } catch {
+    voiceGate = true;
+  }
+}
+
+function stopVoiceActivityGate() {
+  if (vadAnimation) cancelAnimationFrame(vadAnimation);
+  vadAnimation = null;
+  voiceGate = true;
+}
+
+function buildPeerConnection() {
+  peer = new RTCPeerConnection(RTC_CONFIG);
+  peer.onicecandidate = event => {
+    if (event.candidate && activeCall?.id) {
+      sendSignal("ice", {
+        candidate: event.candidate.candidate,
+        sdpMid: event.candidate.sdpMid,
+        sdpMLineIndex: event.candidate.sdpMLineIndex,
+      });
+    }
+  };
+  peer.ontrack = event => {
+    remoteStream = event.streams[0] || new MediaStream([event.track]);
+    attachRemoteMedia();
+    if (activeCall?.state === "active" && !callStartedAt) callConnected();
+  };
+  peer.onconnectionstatechange = () => {
+    if (!peer) return;
+    if (peer.connectionState === "connected" && activeCall?.state === "active" && !callStartedAt) {
+      callConnected();
+    }
+    if (["failed", "disconnected", "closed"].includes(peer.connectionState)) {
+      if (activeCall?.state === "active") finishCall("Connessione alla chiamata persa.");
+    }
+  };
+  if (localStream) {
+    localStream.getTracks().forEach(track => peer.addTrack(track, localStream));
+  }
+}
+
+function sendSignal(kind, payload) {
+  if (!activeCall?.id) return;
+  const d = JSON.stringify(payload);
+  // SDP can be large -> c_video (600KB). ICE candidates are tiny -> c_audio (8KB).
+  send(kind === "sdp"
+    ? { t: "c_video", call: activeCall.id, d }
+    : { t: "c_audio", call: activeCall.id, d });
+}
+
+async function processSignal(message) {
+  if (!peer || !activeCall?.id || message.call !== activeCall.id) return;
+  let payload;
+  try { payload = JSON.parse(message.d); } catch { return; }
+  try {
+    if (payload.sdp !== undefined && payload.type) {
+      await peer.setRemoteDescription({ type: payload.type, sdp: payload.sdp });
+      if (payload.type === "offer") {
+        const answer = await peer.createAnswer();
+        await peer.setLocalDescription(answer);
+        sendSignal("sdp", { type: "answer", sdp: answer.sdp });
+      }
+    } else if (payload.candidate) {
+      await peer.addIceCandidate({
+        candidate: payload.candidate,
+        sdpMid: payload.sdpMid,
+        sdpMLineIndex: payload.sdpMLineIndex,
+      });
+    }
+  } catch (error) {
+    console.warn("[call] signaling error", error);
+  }
+}
+
+function queueSignal(message) {
+  signalChain = signalChain.then(() => processSignal(message));
+}
+
+function attachRemoteMedia() {
+  const wrap = el("callMedia");
+  wrap.classList.remove("hidden");
+  wrap.replaceChildren();
+  if (activeCall?.video) {
+    remoteVideoEl = document.createElement("video");
+    remoteVideoEl.autoplay = true;
+    remoteVideoEl.playsInline = true;
+    remoteVideoEl.className = "call-remote-video";
+    remoteVideoEl.srcObject = remoteStream;
+    wrap.appendChild(remoteVideoEl);
+  }
+  remoteAudioEl = document.createElement("audio");
+  remoteAudioEl.autoplay = true;
+  remoteAudioEl.srcObject = remoteStream;
+  remoteAudioEl.muted = callDeafened;
+  applyCallAudioSettings();
+  remoteAudioEl.play().catch(() => {});
+  wrap.appendChild(remoteAudioEl);
+  if (localStream?.getVideoTracks().length) {
+    localVideoEl = document.createElement("video");
+    localVideoEl.autoplay = true;
+    localVideoEl.playsInline = true;
+    localVideoEl.muted = true;
+    localVideoEl.className = "call-local-video";
+    localVideoEl.srcObject = localStream;
+    wrap.appendChild(localVideoEl);
+  }
+}
+
+function renderCallControls() {
+  const container = el("callActions");
+  container.replaceChildren();
+  if (!activeCall || activeCall.state !== "active") return;
+  const add = (label, icon, run, active = false, danger = false) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `btn ${danger ? "btn-danger" : active ? "btn-primary" : "btn-outline"} small-btn`;
+    button.innerHTML = `<i class="ph ph-${icon}" aria-hidden="true"></i> ${escapeHtml(label)}`;
+    button.addEventListener("click", run);
+    container.appendChild(button);
+  };
+  add(callMuted ? "Riattiva mic" : "Muto", callMuted ? "microphone-slash" : "microphone", () => setCallMuted(!callMuted), callMuted);
+  if (activeCall.video) {
+    add(callCameraOn ? "Video off" : "Video on", callCameraOn ? "video-camera-slash" : "video-camera", toggleCallCamera, !callCameraOn);
+  }
+  add(callDeafened ? "Riattiva audio" : "Scollega audio", callDeafened ? "speaker-high" : "speaker-slash", () => setCallDeafened(!callDeafened), callDeafened);
+  add("Termina", "phone-x", endActiveCall, false, true);
+}
+
+function startCallTicker() {
+  stopCallTicker();
+  callStartedAt = Date.now();
+  const tick = () => {
+    const secs = Math.floor((Date.now() - callStartedAt) / 1000);
+    const mm = String(Math.floor(secs / 60)).padStart(2, "0");
+    const ss = String(secs % 60).padStart(2, "0");
+    el("callStatus").textContent = `Chiamata in corso — ${mm}:${ss}`;
+  };
+  tick();
+  callTicker = setInterval(tick, 1000);
+}
+
+function stopCallTicker() {
+  if (callTicker) clearInterval(callTicker);
+  callTicker = null;
+}
+
+function cleanupCall() {
+  stopCallTicker();
+  stopVoiceActivityGate();
+  stopRingSound();
+  if (peer) {
+    try { peer.onicecandidate = null; peer.ontrack = null; peer.close(); } catch {}
+    peer = null;
+  }
+  if (localStream) {
+    localStream.getTracks().forEach(track => track.stop());
+    localStream = null;
+  }
+  remoteStream = null;
+  remoteAudioEl = null;
+  remoteVideoEl = null;
+  localVideoEl = null;
+  callAudioCtx = null;
+  callGainNode = null;
+  callMuted = false;
+  callDeafened = false;
+  callCameraOn = true;
+  pttHeld = false;
+  voiceGate = true;
+  el("callMedia").classList.add("hidden");
+  el("callMedia").replaceChildren();
+}
+
+async function startOutgoingCall() {
+  try {
+    await acquireLocalMedia(activeCall?.video);
+  } catch {
+    send({ t: "c_end", call: activeCall?.id });
+    finishCall("Impossibile accedere a microfono" + (activeCall?.video ? " o camera" : "") + ". Controlla i permessi del browser.");
+    return;
+  }
+  try {
+    buildPeerConnection();
+    const offer = await peer.createOffer();
+    await peer.setLocalDescription(offer);
+    sendSignal("sdp", { type: "offer", sdp: offer.sdp });
+    el("callStatus").textContent = `Chiamata ${activeCall.video ? "video" : "vocale"} in corso — negoziazione in corso...`;
+    renderCallControls();
+  } catch (error) {
+    console.warn("[call] offer failed", error);
+    send({ t: "c_end", call: activeCall?.id });
+    finishCall("Impossibile avviare la chiamata.");
+  }
+}
+
+async function startIncomingCall() {
+  try {
+    await acquireLocalMedia(activeCall?.video);
+  } catch {
+    send({ t: "c_end", call: activeCall?.id });
+    finishCall("Impossibile accedere a microfono" + (activeCall?.video ? " o camera" : "") + ".");
+    return;
+  }
+  buildPeerConnection();
+  // L'offerta del chiamante arrivera' via c_video: la coda dei segnali la processa.
+  el("callStatus").textContent = "Chiamata connessa — negoziazione in corso...";
+  renderCallControls();
+}
+
+function callConnected() {
+  startCallTicker();
+  attachRemoteMedia();
+  renderCallControls();
 }
 
 function endActiveCall() {
@@ -988,8 +1371,10 @@ function endActiveCall() {
   if (!call) return;
   if (call.id && !send({ t: "c_end", call: call.id })) {
     finishCall("Connessione non disponibile. La chiamata potrebbe essere ancora attiva.");
+    cleanupCall();
     return;
   }
+  cleanupCall();
   finishCall("Chiamata terminata.");
 }
 
@@ -1033,13 +1418,10 @@ function acceptCall() {
     return;
   }
   clearTimeout(callTimer);
+  callTimer = null;
+  stopRingSound();
   activeCall.state = "active";
-  renderCallPanel("Chiamata accettata. Audio/video non disponibile in questa sessione.", [{
-    label: "Termina",
-    icon: "phone-x",
-    style: "btn-danger",
-    run: endActiveCall,
-  }]);
+  startIncomingCall();
 }
 
 function avatarInitial(name) {
@@ -1098,6 +1480,7 @@ function selectContact(username) {
   el("communityChannelBar").classList.add("hidden");
   renderCommunityList(communityListData);
   selectedContact = username;
+  clearUnread(`dm:${String(username).toLowerCase()}`);
   openContactProfileButton.disabled = false;
   convStatus.textContent = username;
   renderSelectedContact();
@@ -1428,8 +1811,8 @@ function applyLiveAppearance() {
   document.documentElement.style.fontSize = `${localSettings.fontSize}%`;
   revealMotionItems(document);
   renderComposerEmoji();
-  if ("setAppBadge" in navigator && localSettings.unreadBadge) navigator.setAppBadge(0).catch(() => {});
-  if ("clearAppBadge" in navigator && !localSettings.unreadBadge) navigator.clearAppBadge().catch(() => {});
+  applyCallAudioSettings();
+  updateUnreadBadge();
 }
 
 if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
@@ -1712,6 +2095,172 @@ function escapeHtml(value) {
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   })[char]);
 }
+
+/* ====================== sounds, notifications, unread ====================== */
+
+let soundCtx = null;
+let ringInterval = null;
+const unreadConvos = new Map();
+
+function ensureSoundCtx() {
+  if (!soundCtx) {
+    soundCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (soundCtx.state === "suspended") soundCtx.resume();
+  return soundCtx;
+}
+
+function tone(freq, dur = 0.12, type = "sine", gain = 0.08, delay = 0) {
+  try {
+    const ctx = ensureSoundCtx();
+    const osc = ctx.createOscillator();
+    const env = ctx.createGain();
+    const t0 = ctx.currentTime + delay;
+    osc.type = type;
+    osc.frequency.value = freq;
+    env.gain.setValueAtTime(0.0001, t0);
+    env.gain.exponentialRampToValueAtTime(gain, t0 + 0.012);
+    env.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    osc.connect(env);
+    env.connect(ctx.destination);
+    osc.start(t0);
+    osc.stop(t0 + dur + 0.05);
+  } catch {}
+}
+
+function ringPattern() {
+  // Dual-tone ring, ~1.2s pattern like a classic phone ring.
+  tone(440, 0.9, "sine", 0.05);
+  tone(480, 0.9, "sine", 0.05);
+}
+
+function startRingSound() {
+  if (ringInterval || localSettings.doNotDisturb || !localSettings.soundCall) return;
+  ringPattern();
+  ringInterval = setInterval(ringPattern, 2600);
+}
+
+function stopRingSound() {
+  if (ringInterval) clearInterval(ringInterval);
+  ringInterval = null;
+}
+
+function playSound(name) {
+  if (localSettings.doNotDisturb) return;
+  switch (name) {
+    case "message":
+      if (!localSettings.soundMessage) return;
+      tone(740, 0.09, "sine", 0.07);
+      tone(988, 0.12, "sine", 0.07, 0.09);
+      break;
+    case "call":
+      if (!localSettings.soundCall) return;
+      tone(620, 0.14, "triangle", 0.09);
+      tone(930, 0.2, "triangle", 0.09, 0.14);
+      break;
+    case "mute":
+      if (!localSettings.soundMute) return;
+      tone(1250, 0.05, "square", 0.035);
+      break;
+  }
+}
+
+function desktopNotify(title, body, convoKey) {
+  if (!localSettings.desktopNotifications || localSettings.doNotDisturb) return;
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  if (document.visibilityState === "visible" && document.hasFocus()) return;
+  try {
+    const note = new Notification(title, { body, tag: convoKey || "ciaochat" });
+    note.onclick = () => {
+      window.focus();
+      if (convoKey) openConvoByKey(convoKey);
+    };
+  } catch {}
+}
+
+function openConvoByKey(key) {
+  if (key.startsWith("dm:")) selectContact(key.slice(3));
+  else if (key.startsWith("cmsg:")) {
+    const [, communityId, channelId] = key.split(":");
+    selectCommunity(communityId);
+    if (channelId) selectCommunityChannel(channelId);
+  }
+}
+
+function markUnread(key, label) {
+  if (!unreadConvos.has(key)) unreadConvos.set(key, label);
+  updateUnreadBadge();
+}
+
+function clearUnread(key) {
+  if (unreadConvos.delete(key)) updateUnreadBadge();
+}
+
+function updateUnreadBadge() {
+  const count = unreadConvos.size;
+  const baseTitle = "CiaoChat";
+  document.title = count ? `(${count}) ${baseTitle}` : baseTitle;
+  if (localSettings.unreadBadge) {
+    if (count > 0 && "setAppBadge" in navigator) navigator.setAppBadge(count).catch(() => {});
+    else if ("clearAppBadge" in navigator) navigator.clearAppBadge().catch(() => {});
+  } else if ("clearAppBadge" in navigator) {
+    navigator.clearAppBadge().catch(() => {});
+  }
+}
+
+function onIncomingMessage(convoKey, label, title, preview, isSelf) {
+  playSound("message");
+  const viewing =
+    (convoKey.startsWith("dm:") && String(selectedContact || "").toLowerCase() === convoKey.slice(3).toLowerCase()) ||
+    (convoKey.startsWith("cmsg:") && currentCommunityId === convoKey.split(":")[1] && currentChannelId === convoKey.split(":")[2]);
+  if (!viewing && !isSelf) markUnread(convoKey, label);
+  desktopNotify(title, preview, convoKey);
+}
+
+/* ================================ keybinds ================================ */
+
+function eventCombo(event) {
+  const keys = [];
+  if (event.ctrlKey) keys.push("Ctrl");
+  if (event.shiftKey) keys.push("Shift");
+  if (event.altKey) keys.push("Alt");
+  if (event.metaKey) keys.push("Meta");
+  keys.push(event.key.length === 1 ? event.key.toUpperCase() : event.key);
+  return keys.join("+");
+}
+
+function handleKeybind(action, down) {
+  if (action === "mute") {
+    if (down) setCallMuted(!callMuted);
+  } else if (action === "deafen") {
+    if (down) setCallDeafened(!callDeafened);
+  } else if (action === "ptt") {
+    pttHeld = down;
+    applyMicState();
+  }
+}
+
+window.addEventListener("keydown", event => {
+  if (event.repeat) return;
+  if (event.target?.matches?.("input, textarea, select, [contenteditable='true']")) return;
+  const combo = eventCombo(event);
+  for (const [action, binding] of Object.entries(localSettings.keybinds || {})) {
+    if (binding && binding === combo) {
+      event.preventDefault();
+      handleKeybind(action, true);
+      return;
+    }
+  }
+});
+window.addEventListener("keyup", event => {
+  const combo = eventCombo(event);
+  for (const [action, binding] of Object.entries(localSettings.keybinds || {})) {
+    if (binding && binding === combo) {
+      handleKeybind(action, false);
+      return;
+    }
+  }
+});
 
 function renderCommunityNav(communities) {
   const nav = el("communitySettingsNav");
@@ -2147,9 +2696,13 @@ el("fontSize").addEventListener("input", () => {
 });
 el("inputVolume").addEventListener("input", () => {
   el("inputVolumeOut").textContent = `${el("inputVolume").value}%`;
+  localSettings.inputVolume = Number(el("inputVolume").value);
+  applyCallAudioSettings();
 });
 el("outputVolume").addEventListener("input", () => {
   el("outputVolumeOut").textContent = `${el("outputVolume").value}%`;
+  localSettings.outputVolume = Number(el("outputVolume").value);
+  applyCallAudioSettings();
 });
 el("voiceSensitivity").addEventListener("input", () => {
   el("voiceSensitivityOut").textContent = el("voiceSensitivity").value;
@@ -2776,6 +3329,7 @@ function onMessage(event) {
         activeCall.id = m.call;
         clearTimeout(callTimer);
         callTimer = null;
+        startRingSound();
         renderCallPanel(`Chiamata ${activeCall.video ? "video" : "vocale"} in attesa di risposta...`, [{
           label: "Annulla",
           icon: "phone-x",
@@ -2792,6 +3346,9 @@ function onMessage(event) {
       }
       const caller = contactProfile(m.from)?.name || m.from;
       activeCall = { id: m.call, from: m.from, video: !!m.video, state: "incoming" };
+      signalChain = Promise.resolve();
+      startRingSound();
+      desktopNotify("Chiamata in arrivo", `${caller} ti sta chiamando${m.video ? " in video" : ""}`, `dm:${m.from}`);
       renderCallPanel(`${caller} ti sta chiamando${m.video ? " in video" : ""}.`, [
         {
           label: "Rispondi",
@@ -2815,13 +3372,14 @@ function onMessage(event) {
     case "c_accepted":
       if (activeCall?.id === m.call) {
         activeCall.state = "active";
-        renderCallPanel("Chiamata accettata. Audio/video non disponibile in questa sessione.", [{
-          label: "Termina",
-          icon: "phone-x",
-          style: "btn-danger",
-          run: endActiveCall,
-        }]);
+        stopRingSound();
+        startOutgoingCall();
       }
+      break;
+
+    case "c_video":
+    case "c_audio":
+      if (activeCall?.id === m.call && m.d) queueSignal(m);
       break;
 
     case "c_ended":
@@ -2833,12 +3391,16 @@ function onMessage(event) {
           dropped: "Connessione alla chiamata interrotta.",
           ended: "Chiamata terminata.",
         };
+        cleanupCall();
         finishCall(reasons[m.reason] || "Chiamata terminata.");
       }
       break;
 
     case "c_taken":
-      if (activeCall?.id === m.call) finishCall("La chiamata è stata risposta su un altro dispositivo.");
+      if (activeCall?.id === m.call) {
+        cleanupCall();
+        finishCall("La chiamata è stata risposta su un altro dispositivo.");
+      }
       break;
 
     case "community_list":
@@ -2865,11 +3427,23 @@ function onMessage(event) {
       }
       break;
 
-    case "community_message":
+    case "community_message": {
+      const msg = m.message;
+      const isSelf = msg?.from === me?.id;
+      const senderName = isSelf ? "Tu" : (contactProfile(msg?.from)?.name || msg?.from || "Qualcuno");
+      const communityName = currentCommunity?.name || m.community || "Community";
+      onIncomingMessage(
+        `cmsg:${m.community}:${m.channel}`,
+        `${communityName} · ${senderName}`,
+        communityName,
+        `${senderName}: ${String(msg?.text || "").slice(0, 120)}`,
+        isSelf,
+      );
       if (m.community === currentCommunityId && m.channel === currentChannelId) {
-        appendCommunityMessage(m.message);
+        appendCommunityMessage(msg);
       }
       break;
+    }
 
     case "community_invite_received":
       if (m.invite) {
@@ -2990,9 +3564,19 @@ function onMessage(event) {
       renderHistory(m.msgs || [], m.with);
       break;
 
-    case "dm":
-      appendMessage(m.from || m.id, m.text, (m.from || m.id)?.toLowerCase() === me?.id ? "self" : "other", m.ts, false, m.attachment);
+    case "dm": {
+      const from = m.from || m.id;
+      const isSelf = String(from || "").toLowerCase() === String(me?.id || "").toLowerCase();
+      onIncomingMessage(
+        `dm:${String(from).toLowerCase()}`,
+        contactProfile(from)?.name || from || "Sconosciuto",
+        contactProfile(from)?.name || from || "CiaoChat",
+        String(m.text || (m.attachment ? "[allegato]" : "")).slice(0, 120),
+        isSelf,
+      );
+      appendMessage(from, m.text, isSelf ? "self" : "other", m.ts, false, m.attachment);
       break;
+    }
 
     case "profile":
       if (m.profile?.id === requestedProfileId) {

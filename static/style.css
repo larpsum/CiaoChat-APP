@@ -739,6 +739,42 @@ input::placeholder { color: var(--text-muted); }
 }
 .call-panel #callActions { display: flex; flex-wrap: wrap; gap: 6px; }
 .call-panel .btn { width: auto; }
+.call-media {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 8px;
+}
+.call-media.hidden { display: none; }
+.call-remote-video {
+  width: 320px;
+  max-width: 60%;
+  aspect-ratio: 16 / 9;
+  border-radius: 10px;
+  background: #000;
+  object-fit: cover;
+}
+.call-local-video {
+  width: 120px;
+  aspect-ratio: 3 / 4;
+  border-radius: 8px;
+  background: #111;
+  object-fit: cover;
+  border: 1px solid var(--border);
+}
+.call-media audio { display: none; }
+.message-attachment-download {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  text-decoration: none;
+}
+.message-attachment-download:hover { background: var(--bg-surface-muted); }
 .btn-danger { background: var(--status-error); color: #fff; }
 .btn-danger:hover { filter: brightness(0.9); }
 .inline-action-feedback { flex-basis: 100%; min-height: 0; font-size: 0.72rem; color: var(--text-muted); }
