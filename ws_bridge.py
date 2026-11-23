@@ -77,6 +77,12 @@ async def static_file(request):
     name = request.match_info["name"]
     return web.FileResponse(os.path.join(STATIC_DIR, name))
 
+async def emoji_file(request):
+    name = request.match_info["name"]
+    if os.path.basename(name) != name or not name.endswith(".svg"):
+        raise web.HTTPNotFound()
+    return web.FileResponse(os.path.join(STATIC_DIR, "emoji", name))
+
 
 async def rpc_request(request, command):
     auth = request.headers.get("Authorization", "")
@@ -328,6 +334,7 @@ async def member_roles_resource(request):
 def main():
     app = web.Application()
     app.router.add_get("/", index)
+    app.router.add_get("/static/emoji/{name}", emoji_file)
     app.router.add_get("/static/{name}", static_file)
     app.router.add_get("/ws", ws_handler)
     app.router.add_get("/api/users/@me", get_me)

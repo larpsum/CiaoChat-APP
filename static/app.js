@@ -604,36 +604,53 @@ function renderCommunityHistory(items) {
 function appendRichText(parent, text) {
   const pattern = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|\*\*([^*\n]+)\*\*|\*([^*\n]+)\*|(https?:\/\/[^\s<>]+)/g;
   const value = String(text || "");
+  const content = document.createElement("span");
+  content.className = "message-body";
   let cursor = 0;
   for (const match of value.matchAll(pattern)) {
     const index = match.index ?? 0;
-    if (index > cursor) parent.appendChild(document.createTextNode(value.slice(cursor, index)));
+    if (index > cursor) content.appendChild(document.createTextNode(value.slice(cursor, index)));
     if (match[1]) {
       const link = document.createElement("a");
       link.href = match[2];
       link.target = "_blank";
       link.rel = "noopener noreferrer";
       link.textContent = match[1];
-      parent.appendChild(link);
+      content.appendChild(link);
     } else if (match[3]) {
       const strong = document.createElement("strong");
       strong.textContent = match[3];
-      parent.appendChild(strong);
+      content.appendChild(strong);
     } else if (match[4]) {
       const emphasis = document.createElement("em");
       emphasis.textContent = match[4];
-      parent.appendChild(emphasis);
+      content.appendChild(emphasis);
     } else {
       const link = document.createElement("a");
       link.href = match[5];
       link.target = "_blank";
       link.rel = "noopener noreferrer";
       link.textContent = match[5];
-      parent.appendChild(link);
+      content.appendChild(link);
     }
     cursor = index + match[0].length;
   }
-  if (cursor < value.length) parent.appendChild(document.createTextNode(value.slice(cursor)));
+  if (cursor < value.length) content.appendChild(document.createTextNode(value.slice(cursor)));
+  renderEmoji(content);
+  parent.appendChild(content);
+}
+
+function renderEmoji(element) {
+  if (!window.twemoji || !element) return;
+  window.twemoji.parse(element, {
+    className: "chat-emoji",
+    callback: icon => `static/emoji/${icon}.svg`,
+  });
+  element.querySelectorAll("img.chat-emoji").forEach(image => {
+    image.addEventListener("error", () => {
+      image.replaceWith(document.createTextNode(image.alt || ""));
+    }, { once: true });
+  });
 }
 
 function renderMessageAttachment(attachment) {
@@ -1255,6 +1272,7 @@ function applyLiveAppearance() {
   if (localSettings.density === "compact") document.body.classList.add("message-compact");
   if (localSettings.reducedMotion) document.body.classList.add("reduced-motion");
   document.documentElement.style.fontSize = `${localSettings.fontSize}%`;
+  renderComposerEmoji();
   if ("setAppBadge" in navigator && localSettings.unreadBadge) navigator.setAppBadge(0).catch(() => {});
   if ("clearAppBadge" in navigator && !localSettings.unreadBadge) navigator.clearAppBadge().catch(() => {});
 }
@@ -2112,6 +2130,30 @@ function updateSendButton() {
     (!messageInput.value.trim() && !hasAttachment);
 }
 
+let composerEmojiText = null;
+
+function renderComposerEmoji() {
+  const overlay = el("messageInputEmojiOverlay");
+  const content = el("messageInputEmojiContent");
+  const enabled = !!localSettings.autoEmoji;
+  messageInput.classList.toggle("emoji-rendering-enabled", enabled);
+  overlay.classList.toggle("hidden", !enabled);
+  if (!enabled) {
+    composerEmojiText = null;
+    return;
+  }
+  if (composerEmojiText !== messageInput.value) {
+    content.textContent = messageInput.value;
+    renderEmoji(content);
+    composerEmojiText = messageInput.value;
+  }
+  syncComposerEmojiScroll();
+}
+
+function syncComposerEmojiScroll() {
+  el("messageInputEmojiContent").style.transform = `translateX(${-messageInput.scrollLeft}px)`;
+}
+
 function discardPendingAttachment() {
   clearTimeout(attachmentTimer);
   attachmentTimer = null;
@@ -2242,6 +2284,7 @@ function sendChatMessage() {
     return;
   }
   messageInput.value = "";
+  renderComposerEmoji();
   discardPendingAttachment();
   setComposerFeedback("", "");
   updateSendButton();
@@ -2254,6 +2297,7 @@ function insertAtCursor(value, selectFromEnd = 0) {
   messageInput.value = text.slice(0, start) + value + text.slice(end);
   const cursor = start + value.length - selectFromEnd;
   messageInput.setSelectionRange(cursor, cursor);
+  renderComposerEmoji();
   messageInput.focus();
   updateSendButton();
 }
@@ -2268,6 +2312,7 @@ function wrapSelection(marker) {
   const caret = start + marker.length + (selected ? selected.length : 0);
   messageInput.setRangeText(replacement, start, end, "end");
   if (!selected) messageInput.setSelectionRange(caret, caret);
+  renderComposerEmoji();
   messageInput.focus();
   updateSendButton();
 }
@@ -2295,6 +2340,7 @@ el("emojiButton").addEventListener("click", () => {
       button.type = "button";
       button.className = "emoji-choice";
       button.textContent = emoji;
+      renderEmoji(button);
       button.setAttribute("aria-label", emoji);
       button.addEventListener("click", () => {
         insertAtCursor(emoji);
@@ -2316,6 +2362,7 @@ el("linkButton").addEventListener("click", () => {
     messageInput.setRangeText(replacement, start, end, "end");
     const cursor = start + selected.length + 3;
     messageInput.setSelectionRange(cursor, cursor + 8);
+    renderComposerEmoji();
     messageInput.focus();
     updateSendButton();
   } else {
@@ -2371,8 +2418,10 @@ logoutBtn.onclick = () => {
 };
 
 messageInput.addEventListener("input", () => {
+  renderComposerEmoji();
   updateSendButton();
 });
+messageInput.addEventListener("scroll", syncComposerEmojiScroll);
 messageInput.addEventListener("keydown", event => {
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();

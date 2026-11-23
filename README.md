@@ -37,6 +37,8 @@ I gruppi sono selezionabili dalla barra laterale. Canali e directory dei parteci
 
 Il composer supporta ricerca contatti, formattazione, emoji, menzioni e invio di allegati JPG, PNG, WEBP, GIF e MP4 (massimo 1,7 MB). Le chiamate gestiscono inviti e segnalazione; il trasporto audio/video non è ancora disponibile.
 
+Le emoji Unicode sono visualizzate con gli asset SVG Twemoji inclusi nell'app, anche nel composer e nel selettore, senza dipendere dal font emoji di Windows. Le immagini Twemoji sono distribuite secondo CC BY 4.0; il parser secondo MIT. Attribuzione e testi di licenza sono in `static/emoji/LICENSE-CC-BY-4.0` e `static/TWEMOJI-LICENSE-MIT`. Asset e parser da [Twemoji 17.0.3](https://github.com/discord/twemoji), copyright Twitter, Inc. e contributori.
+
 Il tema chiaro è disponibile in **Impostazioni > Aspetto & Testo**. Le icone dell'interfaccia usano il foglio di stile ufficiale Phosphor Web, caricato da unpkg.
 
 Le API HTTP locali sono disponibili sotto `/api/`. Richiedono `Authorization: Bearer <token>` e `X-CiaoChat-User: <username>`; comprendono le impostazioni utente, gruppi, ruoli, canali, inviti, membri, ban e audit log. Le richieste vengono inoltrate al server chat e usano le stesse verifiche di permesso del protocollo WebSocket.
