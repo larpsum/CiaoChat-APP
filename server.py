@@ -999,7 +999,7 @@ def handle_user_settings_update(conn, m):
     if appearance is not None:
         if not isinstance(appearance, dict):
             return conn.send({"t": "err", "text": "Impostazioni aspetto non valide."})
-        allowed_themes = {"dark", "oled", "light"}
+        allowed_themes = {"dark", "oled", "light", "glass"}
         allowed_density = {"cozy", "compact"}
         normalized = dict(DEFAULT_USER_SETTINGS["appearance"])
         normalized.update(appearance)

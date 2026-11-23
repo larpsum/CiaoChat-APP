@@ -1399,15 +1399,28 @@ function collectLocalSettings() {
 }
 
 function applyLiveAppearance() {
-  document.body.classList.remove("theme-oled", "theme-light", "message-compact", "reduced-motion");
+  document.body.classList.remove("theme-oled", "theme-light", "theme-glass", "message-compact", "reduced-motion");
   if (localSettings.theme === "oled") document.body.classList.add("theme-oled");
   if (localSettings.theme === "light") document.body.classList.add("theme-light");
+  if (localSettings.theme === "glass") document.body.classList.add("theme-glass");
   if (localSettings.density === "compact") document.body.classList.add("message-compact");
   if (localSettings.reducedMotion) document.body.classList.add("reduced-motion");
   document.documentElement.style.fontSize = `${localSettings.fontSize}%`;
   renderComposerEmoji();
   if ("setAppBadge" in navigator && localSettings.unreadBadge) navigator.setAppBadge(0).catch(() => {});
   if ("clearAppBadge" in navigator && !localSettings.unreadBadge) navigator.clearAppBadge().catch(() => {});
+}
+
+if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+  let glassPointerFrame = null;
+  window.addEventListener("pointermove", event => {
+    if (!document.body.classList.contains("theme-glass")) return;
+    if (glassPointerFrame) cancelAnimationFrame(glassPointerFrame);
+    glassPointerFrame = requestAnimationFrame(() => {
+      document.documentElement.style.setProperty("--glass-x", `${(event.clientX / window.innerWidth) * 100}%`);
+      document.documentElement.style.setProperty("--glass-y", `${(event.clientY / window.innerHeight) * 100}%`);
+    });
+  }, { passive: true });
 }
 
 function markUnsaved() {
