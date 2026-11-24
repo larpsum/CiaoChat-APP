@@ -1316,7 +1316,7 @@ import { RenderPass } from "./vendor/postprocessing/RenderPass.js";
       const depth = random(0.25, 1);
       el.style.filter = `hue-rotate(${random(-8, 8)}deg) brightness(${random(0.82, 1.08)}) blur(${((1 - depth) * 1.4).toFixed(2)}px) drop-shadow(0 ${6 + depth * 8}px ${10 + depth * 12}px rgba(0,0,0,${(0.25 + depth * 0.25).toFixed(2)}))`;
       shell.appendChild(el);
-      banknotes.push({
+      const note = {
         el,
         x: random(-80, (width || 1280) + 80),
         y: random(-(height || 800) * 0.9, (height || 800) * 0.4),
@@ -1328,24 +1328,173 @@ import { RenderPass } from "./vendor/postprocessing/RenderPass.js";
         spin: random(-0.7, 0.7),
         depth,
         scale: 0.55 + depth * 0.65,
-      });
+        grabbed: false,
+        flingX: 0,
+        flingY: 0,
+      };
+      banknotes.push(note);
+      bindBanknote(note);
+    }
+  }
+
+  function bindBanknote(note) {
+    note.el.addEventListener("pointerdown", event => {
+      if (event.button !== undefined && event.button !== 0) return;
+      const bounds = shell.getBoundingClientRect();
+      const px = event.clientX - bounds.left;
+      const py = event.clientY - bounds.top;
+      const centerX = note.x + note.el.offsetWidth / 2;
+      const centerY = note.y + note.el.offsetHeight / 2;
+      note.dragOffsetX = px - centerX;
+      note.dragOffsetY = py - centerY;
+      note.grabbed = true;
+      note.flingX = 0;
+      note.flingY = 0;
+      note.vx = 0;
+      note.vy = 0;
+      note.lastPointerX = px;
+      note.lastPointerY = py;
+      note.lastPointerTime = performance.now();
+      note.el.classList.add("is-grabbed");
+      try {
+        note.el.setPointerCapture(event.pointerId);
+      } catch {}
+      event.preventDefault();
+    });
+
+    note.el.addEventListener("pointermove", event => {
+      if (!note.grabbed) return;
+      const bounds = shell.getBoundingClientRect();
+      const px = clamp(event.clientX - bounds.left, -90, (width || 1280) + 90);
+      const py = clamp(event.clientY - bounds.top, -90, (height || 800) + 90);
+      const now = performance.now();
+      const dt = Math.max(0.008, (now - note.lastPointerTime) / 1000);
+      const vx = (px - note.lastPointerX) / dt;
+      const vy = (py - note.lastPointerY) / dt;
+      note.flingX = note.flingX * 0.62 + vx * 0.38;
+      note.flingY = note.flingY * 0.62 + vy * 0.38;
+      note.vx = note.flingX;
+      note.vy = note.flingY;
+      note.x = px - note.dragOffsetX - note.el.offsetWidth / 2;
+      note.y = py - note.dragOffsetY - note.el.offsetHeight / 2;
+      note.lastPointerX = px;
+      note.lastPointerY = py;
+      note.lastPointerTime = now;
+    });
+
+    const release = () => {
+      if (!note.grabbed) return;
+      note.grabbed = false;
+      note.el.classList.remove("is-grabbed");
+      note.vx = clamp(note.flingX, -420, 420);
+      note.vy = clamp(note.flingY, -360, 520);
+      note.spin = clamp(note.flingX * 0.0025, -2.2, 2.2) + random(-0.2, 0.2);
+    };
+    note.el.addEventListener("pointerup", release);
+    note.el.addEventListener("pointercancel", release);
+    note.el.addEventListener("lostpointercapture", release);
+  }
+
+  function banknoteCenter(note) {
+    return {
+      x: note.x + note.el.offsetWidth / 2,
+      y: note.y + note.el.offsetHeight / 2,
+    };
+  }
+
+  function banknoteRadius(note) {
+    return ((note.el.offsetWidth + note.el.offsetHeight) / 4) * note.scale;
+  }
+
+  function resolveBanknoteCollisions() {
+    for (let i = 0; i < banknotes.length; i++) {
+      for (let j = i + 1; j < banknotes.length; j++) {
+        const a = banknotes[i];
+        const b = banknotes[j];
+        if (a.grabbed && b.grabbed) continue;
+        const ac = banknoteCenter(a);
+        const bc = banknoteCenter(b);
+        const dx = bc.x - ac.x;
+        const dy = bc.y - ac.y;
+        const dist = Math.hypot(dx, dy);
+        const minDist = banknoteRadius(a) + banknoteRadius(b);
+        if (dist >= minDist) continue;
+        if (dist === 0) {
+          b.x += 1;
+          continue;
+        }
+        const nx = dx / dist;
+        const ny = dy / dist;
+        const overlap = minDist - dist;
+        const invA = a.grabbed ? 0 : 1;
+        const invB = b.grabbed ? 0 : 1;
+        const totalInv = invA + invB;
+        if (!totalInv) continue;
+        const corr = (overlap / totalInv) * 0.9;
+        a.x -= nx * corr * invA;
+        a.y -= ny * corr * invA;
+        b.x += nx * corr * invB;
+        b.y += ny * corr * invB;
+        const relN = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
+        if (relN < 0) {
+          const impulse = (-(1 + 0.42) * relN) / totalInv;
+          a.vx -= impulse * invA * nx;
+          a.vy -= impulse * invA * ny;
+          b.vx += impulse * invB * nx;
+          b.vy += impulse * invB * ny;
+          const tx = -ny;
+          const ty = nx;
+          const relT = (b.vx - a.vx) * tx + (b.vy - a.vy) * ty;
+          const friction = (-relT * 0.12) / totalInv;
+          a.vx -= friction * invA * tx;
+          a.vy -= friction * invA * ty;
+          b.vx += friction * invB * tx;
+          b.vy += friction * invB * ty;
+        }
+        a.vx = clamp(a.vx, -460, 460);
+        a.vy = clamp(a.vy, -560, 780);
+        b.vx = clamp(b.vx, -460, 460);
+        b.vy = clamp(b.vy, -560, 780);
+      }
     }
   }
 
   function updateBanknotes(delta, seconds) {
+    const fieldWidth = width || 1280;
+    const fieldHeight = height || 800;
     for (const note of banknotes) {
+      if (note.grabbed) {
+        note.rotBase += note.spin * delta * 0.12;
+        continue;
+      }
       note.vy = Math.min(note.terminal, note.vy + 320 * delta);
+      if (note.vy < -560) note.vy = -560;
+      note.vx = clamp(note.vx, -460, 460);
       note.y += note.vy * delta * (0.7 + note.depth * 0.6);
       note.x += (note.vx + Math.sin(seconds * 1.2 + note.phase) * 26) * delta * (0.7 + note.depth * 0.6);
       note.rotBase += note.spin * delta;
-      if (note.y > (height || 800) + 90) {
+      if (note.y > fieldHeight + 90) {
         note.y = random(-140, -30);
-        note.x = random(-80, (width || 1280) + 80);
+        note.x = random(-80, fieldWidth + 80);
         note.vy = random(40, 110);
+        note.vx = random(-28, 28);
       }
-      if (note.x > (width || 1280) + 120) note.x = -120;
-      if (note.x < -140) note.x = (width || 1280) + 100;
+      if (note.x > fieldWidth + 120) note.x = -120;
+      if (note.x < -140) note.x = fieldWidth + 100;
+    }
+    resolveBanknoteCollisions();
+    for (const note of banknotes) {
       const flutter = Math.sin(seconds * (1.9 + note.depth) + note.phase);
+      if (note.grabbed) {
+        const heldFlutter = flutter * 0.1;
+        const tilt = clamp(note.flingX * 0.0014, -0.55, 0.55);
+        const lean = clamp(note.flingY * 0.0009, -0.12, 0.12);
+        note.el.style.transform =
+          `translate3d(${note.x.toFixed(1)}px, ${note.y.toFixed(1)}px, 0) ` +
+          `rotate(${(note.rotBase + tilt + heldFlutter).toFixed(3)}rad) skewY(${lean.toFixed(3)}rad) ` +
+          `scale(${note.scale.toFixed(3)}, ${note.scale.toFixed(3)})`;
+        continue;
+      }
       const flex = Math.sin(seconds * 2.7 + note.phase * 2.1);
       const rot = note.rotBase + flutter * 0.38;
       const skew = flex * 0.14;

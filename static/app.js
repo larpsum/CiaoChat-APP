@@ -3189,25 +3189,56 @@ function toggleComposerPicker(button, panel, render) {
   }
 }
 
-const commonEmoji = ["😀", "😂", "😊", "😍", "👍", "👏", "🎉", "❤️", "🙏", "🔥"];
+const emojiCatalog = window.emojiCatalog || [];
+let emojiPickerBuilt = false;
+
 el("emojiButton").addEventListener("click", () => {
   toggleComposerPicker(el("emojiButton"), el("emojiPicker"), () => {
     const panel = el("emojiPicker");
-    panel.replaceChildren();
-    commonEmoji.forEach(emoji => {
+    if (emojiPickerBuilt) return;
+    const search = document.createElement("input");
+    search.type = "search";
+    search.className = "emoji-picker-search";
+    search.placeholder = "Cerca emoji...";
+    search.setAttribute("aria-label", "Cerca emoji");
+    const buttons = [];
+    const fragment = document.createDocumentFragment();
+    emojiCatalog.forEach(([emoji, icon, name]) => {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "emoji-choice";
-      button.textContent = emoji;
-      renderEmoji(button);
-      button.setAttribute("aria-label", emoji);
+      button.title = emoji;
+      button.setAttribute("aria-label", name || emoji || icon);
+      button.dataset.search = `${name || ""} ${emoji} ${icon}`.toLowerCase();
+      const image = document.createElement("img");
+      image.className = "chat-emoji";
+      image.src = `static/emoji/${icon}.svg`;
+      image.alt = "";
+      image.draggable = false;
+      image.setAttribute("loading", "lazy");
+      image.setAttribute("decoding", "async");
+      image.addEventListener("error", () => {
+        button.textContent = emoji;
+        image.remove();
+      }, { once: true });
+      button.appendChild(image);
       button.addEventListener("click", () => {
         insertAtCursor(emoji);
         panel.classList.add("hidden");
         el("emojiButton").setAttribute("aria-expanded", "false");
       });
-      panel.appendChild(button);
+      buttons.push(button);
+      fragment.appendChild(button);
     });
+    search.addEventListener("input", () => {
+      const query = search.value.trim().toLowerCase();
+      buttons.forEach(button => {
+        button.hidden = !!query && !button.dataset.search.includes(query);
+      });
+    });
+    panel.appendChild(search);
+    panel.appendChild(fragment);
+    emojiPickerBuilt = true;
   });
 });
 el("boldButton").addEventListener("click", () => wrapSelection("**"));
