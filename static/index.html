@@ -161,7 +161,13 @@
         <div id="callMedia" class="call-media hidden"></div>
         <div id="callActions"></div>
       </section>
+      <div class="msg-search-panel hidden" id="msgSearchPanel">
+        <input type="search" id="msgSearchInput" placeholder="Cerca nei messaggi..." autocomplete="off">
+        <button class="icon-btn" id="msgSearchClose" type="button" aria-label="Chiudi ricerca"><i class="ph ph-x" aria-hidden="true"></i></button>
+        <div class="msg-search-results" id="msgSearchResults"></div>
+      </div>
       <nav class="community-channel-bar hidden" id="communityChannelBar" aria-label="Canali"></nav>
+      <div class="pinned-bar hidden" id="pinnedBar"></div>
 
       <!-- Messages -->
       <div class="messages" id="messages">
@@ -173,6 +179,7 @@
 
       <!-- Composer -->
       <div class="composer">
+        <div class="reply-preview hidden" id="replyPreview"></div>
         <div class="composer-inner">
           <input id="attachmentInput" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4" hidden>
           <button class="icon-btn add" id="attachButton" type="button" title="Allega immagine o video" aria-label="Allega immagine o video"><i class="ph ph-paperclip" aria-hidden="true"></i></button>

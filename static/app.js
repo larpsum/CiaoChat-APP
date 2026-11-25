@@ -47,6 +47,71 @@ let pendingInviteResponseTimer = null;
 let pendingCommunityCreateTimer = null;
 let quickContactTimer = null;
 
+// ---------- Messaggistica avanzata ----------
+const convoCaches = new Map();        // scopeKey -> [msg, ...] ordinati per ts
+const typingUsers = new Map();        // scopeKey -> Set(userId)
+const linkPreviewRequested = new Set();
+let replyTarget = null;               // {scopeKey, kind, with?, community?, channel?, id, from, text}
+let forwardSource = null;             // messaggio da inoltrare
+const peerReadTs = {};                 // DM: user -> ts fino a cui ha letto i miei messaggi
+let activeReadTs = 0;                 // read_ts dell'ultima cronologia renderizzata
+let lastTypingSentAt = 0;
+
+function peerReadTsFor(user) {
+  return peerReadTs[String(user || "").toLowerCase()] || 0;
+}
+
+function msgTs(m) {
+  const ts = Number(m?.ts ?? m?.timestamp ?? 0);
+  return ts > 1e12 ? ts : ts * 1000;   // normalizza secondi -> millisecondi
+}
+
+function activeScope() {
+  if (currentCommunityId && currentChannelId) {
+    return rememberScope({
+      kind: "community",
+      community: currentCommunityId,
+      channel: currentChannelId,
+      key: `c:${currentCommunityId}:${currentChannelId}`,
+    });
+  }
+  if (selectedContact) {
+    const user = String(selectedContact).toLowerCase();
+    return rememberScope({ kind: "dm", with: user, key: `dm:${user}` });
+  }
+  return null;
+}
+
+function scopeFields(scope) {
+  if (!scope) return {};
+  return scope.kind === "community"
+    ? { community: scope.community, channel: scope.channel }
+    : { with: scope.with };
+}
+
+function convoCache(key) {
+  if (!convoCaches.has(key)) convoCaches.set(key, []);
+  return convoCaches.get(key);
+}
+
+function upsertCachedMessage(scopeKey, msg) {
+  const list = convoCache(scopeKey);
+  const index = list.findIndex(item => item.id === msg.id);
+  if (index >= 0) list[index] = { ...list[index], ...msg };
+  else {
+    list.push(msg);
+    list.sort((a, b) => msgTs(a) - msgTs(b));
+  }
+  return list;
+}
+
+function patchCachedMessage(scopeKey, id, patch) {
+  const list = convoCaches.get(scopeKey);
+  const item = list?.find(entry => entry.id === id);
+  if (item) Object.assign(item, patch);
+  return item;
+}
+
 const DEFAULT_LOCAL_SETTINGS = {
   theme: "dark",
   density: "cozy",
@@ -309,7 +374,9 @@ function renderContacts() {
     styleName(name, c);
     const status = document.createElement("div");
     status.className = "contact-status";
-    status.textContent = c.online ? "Online" : "Offline";
+    status.textContent = c.online ? "Online"
+      : c.last_seen ? `Ultimo accesso ${new Date(msgTs({ ts: c.last_seen })).toLocaleDateString([], { day: "2-digit", month: "2-digit" })}`
+      : "Offline";
     details.append(name, status);
     item.append(avatar, details);
     item.onclick = () => selectContact(username);
@@ -368,6 +435,10 @@ function renderCommunityList(communities) {
 
 function selectCommunity(communityId) {
   discardPendingAttachment();
+  replyTarget = null;
+  renderReplyPreview();
+  closeForwardPicker();
+  toggleMsgSearch(false);
   currentCommunityId = communityId;
   currentCommunity = null;
   currentChannelId = null;
@@ -609,6 +680,10 @@ function showCommunityInChat(community) {
   });
   if (currentChannelId) {
     messageInput.disabled = false;
+    el("pinnedBar").classList.add("hidden");
+    updateTypingIndicator();
+    restoreDraft();
+    updateConvStatus();
     updateSendButton();
     send({ t: "community_channel_history", community: community.id, channel: currentChannelId });
   } else {
@@ -621,23 +696,31 @@ function showCommunityInChat(community) {
 function selectCommunityChannel(channelId) {
   if (!currentCommunity || !currentCommunity.channels?.some(channel => channel.id === channelId)) return;
   discardPendingAttachment();
+  replyTarget = null;
+  renderReplyPreview();
+  closeForwardPicker();
+  toggleMsgSearch(false);
   currentChannelId = channelId;
   clearUnread(`cmsg:${currentCommunityId}:${channelId}`);
   const channel = currentCommunity.channels.find(item => item.id === channelId);
-  convStatus.textContent = `# ${channel.name}`;
   el("communityChannelBar").querySelectorAll(".community-channel-button").forEach(button => {
     button.classList.toggle("active", button.dataset.channelId === channelId);
   });
   messageInput.disabled = false;
+  el("pinnedBar").classList.add("hidden");
+  updateTypingIndicator();
+  restoreDraft();
+  updateConvStatus();
   updateSendButton();
   send({ t: "community_channel_history", community: currentCommunityId, channel: channelId });
 }
 
-function renderCommunityHistory(items) {
-  messages.replaceChildren();
-  if (!items.length) messages.appendChild(makePlaceholder("Nessun messaggio in questo canale."));
-  items.forEach(item => appendCommunityMessage(item));
-  scrollBottom();
+function renderCommunityHistory(items, readTs = 0) {
+  const scope = activeScope()?.kind === "community"
+    ? activeScope()
+    : { kind: "community", community: currentCommunityId, channel: currentChannelId,
+        key: `c:${currentCommunityId}:${currentChannelId}` };
+  renderConvoList(scope, items || [], readTs);
 }
 
 function appendRichText(parent, text) {
@@ -746,31 +829,719 @@ function renderMessageAttachment(attachment) {
   return media;
 }
 
-function appendCommunityMessage(item) {
-  if (!item || (!item.text && !item.attachment)) return;
+// ---------- Renderer messaggi (DM e community) ----------
+const QUICK_REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
+
+function msgSeconds(msg) {
+  return Number(msg?.ts ?? msg?.timestamp ?? 0);
+}
+
+function isSelfMessage(msg) {
+  return String(msg?.from || "").toLowerCase() === String(me?.id || "").toLowerCase();
+}
+
+function authorLabel(userId) {
+  const participant = currentCommunity?.participants?.find(person => person.id === userId);
+  const profile = participant || contactProfile(userId);
+  return profile?.name || profile?.username || userId || "";
+}
+
+function unreadDividerEl() {
   const div = document.createElement("div");
-  div.className = `msg ${item.from === me?.id ? "self" : "other"}`;
-  if (item.from !== me?.id) {
+  div.className = "unread-divider";
+  div.innerHTML = "<span>Nuovi messaggi</span>";
+  return div;
+}
+
+function replyQuoteEl(reply, scope) {
+  const quote = document.createElement("button");
+  quote.type = "button";
+  quote.className = "msg-reply";
+  const author = document.createElement("span");
+  author.className = "msg-reply-author";
+  author.textContent = authorLabel(reply.from);
+  const text = document.createElement("span");
+  text.className = "msg-reply-text";
+  text.textContent = reply.text || "";
+  quote.append(author, text);
+  quote.addEventListener("click", () => jumpToMessage(scope, reply.id));
+  return quote;
+}
+
+function renderReactionChips(parent, msg, scope) {
+  const reactions = msg.reactions && typeof msg.reactions === "object" ? msg.reactions : {};
+  const entries = Object.entries(reactions)
+    .filter(([, users]) => Array.isArray(users) && users.length > 0);
+  if (!entries.length) return;
+  const row = document.createElement("div");
+  row.className = "msg-reactions";
+  for (const [emoji, users] of entries) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "msg-reaction";
+    if (users.includes(me?.id)) chip.classList.add("mine");
+    chip.textContent = `${emoji} ${users.length}`;
+    chip.title = "Reazione";
+    chip.addEventListener("click", event => {
+      event.stopPropagation();
+      send({ t: "msg_react", scope: scope.kind, ...scopeFields(scope), id: msg.id, emoji });
+    });
+    row.appendChild(chip);
+  }
+  parent.appendChild(row);
+}
+
+function renderVoiceMessage(voice) {
+  if (!voice?.hash) return null;
+  const wrap = document.createElement("div");
+  wrap.className = "msg-voice";
+  const source = mediaCache.get(voice.hash);
+  if (!source) {
+    const load = document.createElement("button");
+    load.type = "button";
+    load.className = "message-attachment-loading";
+    load.dataset.voiceHash = voice.hash;
+    load.innerHTML = '<i class="ph ph-download-simple" aria-hidden="true"></i> Carica vocale';
+    load.addEventListener("click", () => {
+      if (send({ t: "media_get", hash: voice.hash })) {
+        load.disabled = true;
+        load.textContent = "Caricamento...";
+      }
+    });
+    wrap.appendChild(load);
+    return wrap;
+  }
+  const audio = document.createElement("audio");
+  audio.className = "msg-voice-audio";
+  audio.controls = true;
+  audio.preload = "none";
+  audio.src = source;
+  wrap.appendChild(audio);
+  return wrap;
+}
+
+function canPinMessages(scope) {
+  if (scope?.kind !== "community") return true;
+  const p = currentCommunity?.permissions || {};
+  return Boolean(p.manage_messages || p.administrator);
+}
+
+function canDeleteOthers(scope) {
+  if (scope?.kind !== "community") return false;
+  const p = currentCommunity?.permissions || {};
+  return Boolean(p.manage_messages || p.administrator);
+}
+
+function attachMessageActions(div, msg, scope) {
+  if (!msg.id || msg.deleted) return;
+  const isMine = isSelfMessage(msg);
+  const bar = document.createElement("div");
+  bar.className = "msg-actions";
+  QUICK_REACTIONS.forEach(emoji => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "msg-action msg-react-quick";
+    button.textContent = emoji;
+    button.title = "Reazione";
+    button.setAttribute("aria-label", `Reagisci con ${emoji}`);
+    button.addEventListener("click", event => {
+      event.stopPropagation();
+      send({ t: "msg_react", scope: scope.kind, ...scopeFields(scope), id: msg.id, emoji });
+    });
+    bar.appendChild(button);
+  });
+  const add = (icon, title, run) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "msg-action";
+    button.innerHTML = `<i class="ph ${icon}" aria-hidden="true"></i>`;
+    button.title = title;
+    button.setAttribute("aria-label", title);
+    button.addEventListener("click", event => {
+      event.stopPropagation();
+      run();
+    });
+    bar.appendChild(button);
+  };
+  add("ph-arrow-bend-up-left", "Rispondi", () => startReply(msg, scope));
+  add("ph-share-forward", "Inoltra", () => openForwardPicker(msg));
+  if (canPinMessages(scope)) {
+    add(msg.pinned ? "ph-push-pin-slash" : "ph-push-pin",
+        msg.pinned ? "Rimuovi fissaggio" : "Fissa messaggio",
+        () => send({ t: "msg_pin", scope: scope.kind, ...scopeFields(scope), id: msg.id, pinned: !msg.pinned }));
+  }
+  if (isMine && !msg.deleted) {
+    add("ph-pencil-simple", "Modifica", () => startMessageEdit(div, msg, scope));
+  }
+  if (isMine || canDeleteOthers(scope)) {
+    add("ph-trash", "Elimina", () => {
+      if (confirm("Eliminare questo messaggio?")) {
+        send({ t: "msg_delete", scope: scope.kind, ...scopeFields(scope), id: msg.id });
+      }
+    });
+  }
+  div.appendChild(bar);
+}
+
+function buildMessageEl(msg, scope) {
+  const div = document.createElement("div");
+  const isSelf = isSelfMessage(msg);
+  div.className = `msg ${isSelf ? "self" : "other"}`;
+  if (msg.id) div.dataset.msgId = msg.id;
+  if (scope?.key) div.dataset.scopeKey = scope.key;
+  if (msg.pinned) div.classList.add("is-pinned");
+  if (!isSelf) {
     const author = document.createElement("strong");
-    author.className = "message-author";
-    const participant = currentCommunity?.participants?.find(person => person.id === item.from);
-    author.textContent = participant?.name || participant?.username || item.from;
+    author.className = "message-author name-style";
+    author.textContent = authorLabel(msg.from);
+    const profile = contactProfile(msg.from) ||
+      currentCommunity?.participants?.find(person => person.id === msg.from);
+    styleName(author, profile);
     div.appendChild(author);
   }
-  appendRichText(div, item.text);
-  const attachment = renderMessageAttachment(item.attachment);
-  if (attachment) div.appendChild(attachment);
+  if (msg.reply_to?.id) div.appendChild(replyQuoteEl(msg.reply_to, scope));
+  if (msg.forwarded) {
+    const fwd = document.createElement("div");
+    fwd.className = "message-forwarded";
+    fwd.textContent = `Inoltrato da ${authorLabel(msg.forwarded_from)}`;
+    div.appendChild(fwd);
+  }
+  if (msg.deleted) {
+    const del = document.createElement("p");
+    del.className = "msg-deleted";
+    del.textContent = "Messaggio eliminato";
+    div.appendChild(del);
+  } else {
+    appendRichText(div, msg.text || "");
+    const renderedAttachment = renderMessageAttachment(msg.attachment);
+    if (renderedAttachment) div.appendChild(renderedAttachment);
+    const renderedVoice = renderVoiceMessage(msg.voice);
+    if (renderedVoice) div.appendChild(renderedVoice);
+    renderReactionChips(div, msg, scope);
+  }
   const metadata = document.createElement("span");
   metadata.className = "meta";
-  metadata.textContent = item.timestamp
-    ? new Date(item.timestamp * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-    : "";
+  const ts = msgTs(msg);
+  let metaText = ts ? new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+  if (msg.edited && !msg.deleted) metaText += metaText ? " · modificato" : "modificato";
+  if (isSelf && scope?.kind === "dm" && peerReadTsFor(scope.with) >= msgSeconds(msg)) {
+    metaText += metaText ? " · Letto" : "Letto";
+  }
+  metadata.textContent = metaText;
   div.appendChild(metadata);
+  attachMessageActions(div, msg, scope);
+  return div;
+}
+
+function renderPinnedBar(scope) {
+  const bar = el("pinnedBar");
+  if (!bar) return;
+  const pinned = (convoCaches.get(scope.key) || []).filter(item => item.pinned && !item.deleted);
+  bar.replaceChildren();
+  if (!pinned.length) {
+    bar.classList.add("hidden");
+    return;
+  }
+  const latest = pinned[pinned.length - 1];
+  const icon = document.createElement("i");
+  icon.className = "ph ph-push-pin";
+  icon.setAttribute("aria-hidden", "true");
+  const text = document.createElement("span");
+  text.className = "pinned-bar-text";
+  text.textContent = pinned.length > 1
+    ? `${pinned.length} messaggi fissati — ultimo: ${authorLabel(latest.from)}: ${(latest.text || "[allegato]").slice(0, 80)}`
+    : `${authorLabel(latest.from)}: ${(latest.text || "[allegato]").slice(0, 120)}`;
+  bar.append(icon, text);
+  bar.classList.remove("hidden");
+  bar.onclick = () => jumpToMessage(scope, latest.id);
+}
+
+function appendToMessages(div) {
   const placeholder = messages.querySelector(".msg-placeholder");
   if (placeholder) placeholder.remove();
   messages.appendChild(div);
   revealMotionItems(div);
+}
+
+function appendCommunityMessage(item) {
+  if (!item || (!item.text && !item.attachment && !item.voice && !item.deleted)) return;
+  const scope = activeScope()?.kind === "community"
+    ? activeScope()
+    : { kind: "community", community: currentCommunityId, channel: currentChannelId,
+        key: `c:${currentCommunityId}:${currentChannelId}` };
+  appendToMessages(buildMessageEl(item, scope));
   scrollBottom();
+}
+
+// ---------- Risposta, inoltro, modifica, eliminazione ----------
+function startReply(msg, scope) {
+  replyTarget = {
+    scopeKey: scope.key, kind: scope.kind, ...scopeFields(scope),
+    id: msg.id, from: msg.from,
+    text: (msg.text || "").slice(0, 140) || (msg.attachment ? "[allegato]" : "[messaggio]"),
+  };
+  renderReplyPreview();
+  messageInput.focus();
+}
+
+function renderReplyPreview() {
+  const bar = el("replyPreview");
+  bar.replaceChildren();
+  if (!replyTarget) {
+    bar.classList.add("hidden");
+    return;
+  }
+  bar.classList.remove("hidden");
+  const label = document.createElement("span");
+  label.className = "reply-preview-label";
+  label.textContent = `Risposta a ${authorLabel(replyTarget.from)}`;
+  const text = document.createElement("span");
+  text.className = "reply-preview-text";
+  text.textContent = replyTarget.text || "";
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "icon-btn";
+  cancel.innerHTML = '<i class="ph ph-x" aria-hidden="true"></i>';
+  cancel.title = "Annulla risposta";
+  cancel.setAttribute("aria-label", "Annulla risposta");
+  cancel.addEventListener("click", () => {
+    replyTarget = null;
+    renderReplyPreview();
+    messageInput.focus();
+  });
+  bar.append(label, text, cancel);
+}
+
+function replyPayload() {
+  if (!replyTarget) return null;
+  return { id: replyTarget.id, from: replyTarget.from, text: replyTarget.text };
+}
+
+const communityDataCache = new Map();
+
+function openForwardPicker(msg) {
+  forwardSource = msg;
+  closeForwardPicker();
+  const panel = document.createElement("div");
+  panel.className = "forward-panel";
+  panel.id = "forwardPanel";
+  const title = document.createElement("div");
+  title.className = "forward-panel-title";
+  title.textContent = "Inoltra a...";
+  panel.appendChild(title);
+  const list = document.createElement("div");
+  list.className = "forward-panel-list";
+  contacts.forEach(contact => {
+    const target = contact.id || contact.username;
+    if (!target) return;
+    list.appendChild(forwardTargetButton(
+      contact.name || contact.username || target, "ph-user",
+      () => forwardMessageTo({ t: "dm", to: target })));
+  });
+  communityListData.forEach(community => {
+    const cached = communityDataCache.get(community.id);
+    const channels = cached?.channels || [];
+    if (!channels.length) {
+      list.appendChild(forwardTargetButton(
+        `${community.name} (carica canali...)`, "ph-users",
+        () => {
+          send({ t: "community_get", community: community.id });
+          setTimeout(openForwardPicker, 800, msg);
+        }));
+      return;
+    }
+    channels.forEach(channel => {
+      list.appendChild(forwardTargetButton(
+        `${community.name} › #${channel.name}`, "ph-hash",
+        () => forwardMessageTo({
+          t: "community_channel_send", community: community.id, channel: channel.id,
+        })));
+    });
+  });
+  if (!list.children.length) {
+    const empty = document.createElement("div");
+    empty.className = "forward-panel-empty";
+    empty.textContent = "Nessuna destinazione disponibile.";
+    list.appendChild(empty);
+  }
+  panel.appendChild(list);
+  document.body.appendChild(panel);
+  const close = event => {
+    if (!panel.contains(event.target)) closeForwardPicker();
+  };
+  setTimeout(() => document.addEventListener("click", close), 0);
+  panel._outsideClose = close;
+}
+
+function forwardTargetButton(label, icon, run) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "forward-target";
+  button.innerHTML = `<i class="ph ${icon}" aria-hidden="true"></i><span></span>`;
+  button.querySelector("span").textContent = label;
+  button.addEventListener("click", run);
+  return button;
+}
+
+function closeForwardPicker() {
+  const panel = el("forwardPanel");
+  if (panel) {
+    if (panel._outsideClose) document.removeEventListener("click", panel._outsideClose);
+    panel.remove();
+  }
+  forwardSource = null;
+}
+
+function forwardMessageTo(target) {
+  const src = forwardSource;
+  if (!src) return;
+  const text = String(src.text || "").trim()
+    || (src.attachment ? "[Allegato]" : "")
+    || (src.voice ? "[Messaggio vocale]" : "");
+  if (!text) {
+    closeForwardPicker();
+    return;
+  }
+  const payload = { ...target, text, forwarded_from: me?.username || me?.id };
+  if (send(payload)) {
+    const scope = activeScope();
+    const sameTarget = target.t === "dm"
+      ? scope?.kind === "dm" && scope.with === String(target.to).toLowerCase()
+      : scope?.kind === "community" && scope.community === target.community && scope.channel === target.channel;
+    if (sameTarget) setComposerFeedback("Messaggio inoltrato.", "success");
+  }
+  closeForwardPicker();
+}
+
+function startMessageEdit(div, msg, scope) {
+  if (div.querySelector(".msg-edit-box")) return;
+  const body = div.querySelector(".message-body");
+  const box = document.createElement("div");
+  box.className = "msg-edit-box";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "msg-edit-input";
+  input.value = msg.text || "";
+  input.maxLength = 2000;
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "btn btn-primary btn-sm";
+  save.textContent = "Salva";
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "btn btn-outline btn-sm";
+  cancel.textContent = "Annulla";
+  const submit = () => {
+    const text = input.value.trim();
+    if (text && text !== msg.text) {
+      send({ t: "msg_edit", scope: scope.kind, ...scopeFields(scope), id: msg.id, text });
+    }
+    box.remove();
+  };
+  save.addEventListener("click", submit);
+  cancel.addEventListener("click", () => box.remove());
+  input.addEventListener("keydown", event => {
+    if (event.key === "Enter") submit();
+    if (event.key === "Escape") box.remove();
+  });
+  box.append(input, save, cancel);
+  div.insertBefore(box, body ? body.nextSibling : div.firstChild);
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+}
+
+// ---------- Jump, cache, aggiornamenti in tempo reale ----------
+const scopeByKey = new Map();
+
+function rememberScope(scope) {
+  if (scope?.key) scopeByKey.set(scope.key, scope);
+  return scope;
+}
+
+function scopeFromKey(key) {
+  if (scopeByKey.has(key)) return scopeByKey.get(key);
+  if (key?.startsWith("c:")) {
+    const [, community, channel] = key.split(":");
+    return rememberScope({ kind: "community", community, channel, key });
+  }
+  if (key?.startsWith("dm:")) {
+    return rememberScope({ kind: "dm", with: key.slice(3), key });
+  }
+  return null;
+}
+
+function trimCache(key) {
+  const list = convoCaches.get(key);
+  if (list && list.length > 400) convoCaches.set(key, list.slice(-400));
+}
+
+function jumpToMessage(scope, id) {
+  if (!scope || !id) return;
+  const msg = (convoCaches.get(scope.key) || []).find(item => item.id === id);
+  if (!msg) {
+    send({ t: "msg_get", scope: scope.kind, ...scopeFields(scope), id });
+    return;
+  }
+  const node = messages.querySelector(`.msg[data-msg-id="${CSS.escape(String(id))}"]`);
+  if (node) {
+    node.scrollIntoView({ behavior: "smooth", block: "center" });
+    node.classList.add("msg-flash");
+    setTimeout(() => node.classList.remove("msg-flash"), 1600);
+  }
+}
+
+function refreshMessageElement(scopeKey, id) {
+  const scope = scopeFromKey(scopeKey);
+  const msg = (convoCaches.get(scopeKey) || []).find(item => item.id === id);
+  const node = messages.querySelector(`.msg[data-msg-id="${CSS.escape(String(id))}"]`);
+  if (!scope || !msg || !node) return;
+  node.replaceWith(buildMessageEl(msg, scope));
+}
+
+function renderConvoList(scope, list, readTs = 0) {
+  activeReadTs = readTs || 0;
+  convoCaches.set(scope.key, list.slice());
+  trimCache(scope.key);
+  messages.innerHTML = "";
+  if (!list.length) {
+    messages.appendChild(makePlaceholder(
+      scope.kind === "community" ? "Nessun messaggio in questo canale." : "Nessun messaggio ancora."));
+  }
+  const meId = String(me?.id || "").toLowerCase();
+  let dividerDone = !activeReadTs;
+  list.forEach(msg => {
+    if (!dividerDone && String(msg.from || "").toLowerCase() !== meId && msgSeconds(msg) > activeReadTs) {
+      messages.appendChild(unreadDividerEl());
+      dividerDone = true;
+    }
+    const div = buildMessageEl(msg, scope);
+    appendToMessages(div);
+    maybeRequestLinkPreview(div, msg);
+  });
+  renderPinnedBar(scope);
+  scrollBottom();
+  reportRead(scope);
+}
+
+function reportRead(scope, ts) {
+  if (!scope || !ws || ws.readyState !== WebSocket.OPEN) return;
+  let value = ts;
+  if (!value) {
+    const meId = String(me?.id || "").toLowerCase();
+    value = 0;
+    for (const msg of convoCaches.get(scope.key) || []) {
+      if (String(msg.from || "").toLowerCase() === meId) continue;
+      const seconds = msgSeconds(msg);
+      if (seconds > value) value = seconds;
+    }
+  }
+  if (!value) return;
+  send({ t: "msg_read", ...scopeFields(scope), ts: Math.floor(value) });
+}
+
+// ---------- Indicatore "sta scrivendo" ----------
+function typingScopeKey(m) {
+  return m.community && m.channel
+    ? `c:${m.community}:${m.channel}`
+    : `dm:${String(m.from || "").toLowerCase()}`;
+}
+
+function updateTypingIndicator() {
+  let indicator = el("typingIndicator");
+  if (!indicator) {
+    indicator = document.createElement("div");
+    indicator.id = "typingIndicator";
+    indicator.className = "typing-indicator hidden";
+    messages.appendChild(indicator);
+  }
+  const scope = activeScope();
+  const users = scope ? [...(typingUsers.get(scope.key) || [])].filter(user => user !== me?.id) : [];
+  if (!users.length) {
+    indicator.classList.add("hidden");
+    indicator.textContent = "";
+    return;
+  }
+  const names = users.slice(0, 3).map(authorLabel);
+  indicator.textContent = users.length === 1
+    ? `${names[0]} sta scrivendo...`
+    : `${names.join(", ")}${users.length > 3 ? ` +${users.length - 3}` : ""} scrivono...`;
+  indicator.classList.remove("hidden");
+  scrollBottom();
+}
+
+function showTyping(m) {
+  const key = typingScopeKey(m);
+  if (!typingUsers.has(key)) typingUsers.set(key, new Set());
+  typingUsers.get(key).add(m.from);
+  updateTypingIndicator();
+}
+
+function expireTyping(key, user) {
+  setTimeout(() => {
+    typingUsers.get(key)?.delete(user);
+    if (!typingUsers.get(key)?.size) typingUsers.delete(key);
+    updateTypingIndicator();
+  }, 5000);
+}
+
+function maybeSendTyping() {
+  const scope = activeScope();
+  if (!scope || !messageInput.value.trim()) return;
+  const nowMs = Date.now();
+  if (nowMs - lastTypingSentAt < 3000) return;
+  lastTypingSentAt = nowMs;
+  send({ t: "typing", ...scopeFields(scope) });
+}
+
+// ---------- Bozze, presenza, ricerca messaggi, anteprime link ----------
+function draftKey(scope) {
+  return scope ? `ciaochat.draft.${scope.key}` : null;
+}
+
+function saveDraft() {
+  const key = draftKey(activeScope());
+  if (!key) return;
+  const value = messageInput.value;
+  if (value) localStorage.setItem(key, value);
+  else localStorage.removeItem(key);
+}
+
+function restoreDraft() {
+  const key = draftKey(activeScope());
+  messageInput.value = key ? (localStorage.getItem(key) || "") : "";
+  renderComposerEmoji();
+  updateSendButton();
+}
+
+function clearDraft(scope) {
+  const key = draftKey(scope || activeScope());
+  if (key) localStorage.removeItem(key);
+}
+
+function updateConvStatus() {
+  if (currentCommunityId) {
+    const channel = currentCommunity?.channels?.find(item => item.id === currentChannelId);
+    convStatus.textContent = channel ? `# ${channel.name}` : "";
+    return;
+  }
+  if (!selectedContact) {
+    convStatus.textContent = "Seleziona una conversazione";
+    return;
+  }
+  const profile = contactProfile(selectedContact);
+  if (profile?.online) {
+    convStatus.textContent = "Online";
+  } else if (profile?.last_seen) {
+    const seen = msgTs({ ts: profile.last_seen });
+    convStatus.textContent = `Ultimo accesso ${new Date(seen).toLocaleString([], { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}`;
+  } else {
+    convStatus.textContent = selectedContact;
+  }
+}
+
+function toggleMsgSearch(open) {
+  const panel = el("msgSearchPanel");
+  const show = open ?? panel.classList.contains("hidden");
+  panel.classList.toggle("hidden", !show);
+  el("searchButton").classList.toggle("active", show);
+  if (show) {
+    el("msgSearchResults").replaceChildren();
+    el("msgSearchInput").focus();
+  }
+}
+
+function runMsgSearch() {
+  const scope = activeScope();
+  const query = el("msgSearchInput").value.trim();
+  el("msgSearchResults").replaceChildren();
+  if (!scope || query.length < 2) return;
+  send({ t: "msg_search", q: query, scope: scope.kind, ...scopeFields(scope) });
+}
+
+function renderSearchResults(m) {
+  const scope = activeScope();
+  const results = el("msgSearchResults");
+  results.replaceChildren();
+  const items = m.results || [];
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "msg-search-empty";
+    empty.textContent = "Nessun risultato.";
+    results.appendChild(empty);
+    return;
+  }
+  items.forEach(item => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "msg-search-result";
+    const author = document.createElement("span");
+    author.className = "msg-search-author";
+    author.textContent = authorLabel(item.from);
+    const snippet = document.createElement("span");
+    snippet.className = "msg-search-snippet";
+    const q = (m.q || "").toLowerCase();
+    const text = item.text || "";
+    const idx = text.toLowerCase().indexOf(q);
+    if (idx >= 0) {
+      snippet.append(
+        document.createTextNode(text.slice(0, idx)),
+        Object.assign(document.createElement("mark"), { textContent: text.slice(idx, idx + q.length) }),
+        document.createTextNode(text.slice(idx + q.length)),
+      );
+    } else {
+      snippet.textContent = text.slice(0, 140);
+    }
+    const time = document.createElement("span");
+    time.className = "msg-search-time";
+    const ts = msgTs({ ts: item.ts });
+    time.textContent = ts ? new Date(ts).toLocaleString([], { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "";
+    button.append(author, snippet, time);
+    button.addEventListener("click", () => {
+      if (scope) jumpToMessage(scope, item.id);
+      toggleMsgSearch(false);
+    });
+    results.appendChild(button);
+  });
+}
+
+function maybeRequestLinkPreview(div, msg) {
+  if (!localSettings.linkPreviews || msg.deleted) return;
+  const link = div.querySelector(".message-body a[href^='http']");
+  const url = link?.href;
+  if (!url || linkPreviewRequested.has(url)) return;
+  linkPreviewRequested.add(url);
+  send({ t: "link_preview", url });
+}
+
+function onLinkPreview(m) {
+  if (!m.preview || !m.url) return;
+  const node = messages.querySelector(`.msg a[href="${CSS.escape(m.url)}"]`);
+  const msgEl = node?.closest(".msg");
+  if (!msgEl || msgEl.querySelector(".link-preview-card")) return;
+  const card = document.createElement("a");
+  card.className = "link-preview-card";
+  card.href = m.url;
+  card.target = "_blank";
+  card.rel = "noopener noreferrer";
+  if (m.preview.image) {
+    const img = document.createElement("img");
+    img.src = m.preview.image;
+    img.alt = "";
+    img.loading = "lazy";
+    card.appendChild(img);
+  }
+  const body = document.createElement("span");
+  body.className = "link-preview-body";
+  const title = document.createElement("strong");
+  title.textContent = m.preview.title || m.url;
+  body.appendChild(title);
+  if (m.preview.description) {
+    const desc = document.createElement("small");
+    desc.textContent = m.preview.description;
+    body.appendChild(desc);
+  }
+  card.appendChild(body);
+  msgEl.appendChild(card);
 }
 
 function toggleInlineRoleEditor(row, participant, roles) {
@@ -1494,6 +2265,10 @@ function failMemberAction(message) {
 
 function selectContact(username) {
   discardPendingAttachment();
+  replyTarget = null;
+  renderReplyPreview();
+  closeForwardPicker();
+  toggleMsgSearch(false);
   currentCommunityId = null;
   currentCommunity = null;
   currentChannelId = null;
@@ -1504,17 +2279,20 @@ function selectContact(username) {
   el("visibleParticipantCount").textContent = "0 members";
   participantDirectory.replaceChildren();
   el("communityChannelBar").classList.add("hidden");
+  el("pinnedBar").classList.add("hidden");
   renderCommunityList(communityListData);
   selectedContact = username;
   clearUnread(`dm:${String(username).toLowerCase()}`);
   openContactProfileButton.disabled = false;
-  convStatus.textContent = username;
   renderSelectedContact();
   renderContacts();
   messages.innerHTML = "";
+  updateTypingIndicator();
   messages.appendChild(makePlaceholder("Seleziona un contatto per iniziare a chattare."));
   send({ t: "history", with: username });
   messageInput.disabled = false;
+  restoreDraft();
+  updateConvStatus();
   updateSendButton();
   messageInput.focus();
 }
@@ -3127,9 +3905,12 @@ function sendChatMessage() {
       : selectedContact
         ? { to: selectedContact }
         : null;
+  const reply = replyPayload();
   const payload = target?.community
-    ? { t: "community_channel_send", ...target, text, ...(attachment ? { attachment } : {}) }
-    : { t: "dm", to: target?.to || selectedContact, text, ...(attachment ? { attachment } : {}) };
+    ? { t: "community_channel_send", ...target, text,
+        ...(attachment ? { attachment } : {}), ...(reply ? { reply_to: reply } : {}) }
+    : { t: "dm", to: target?.to || selectedContact, text,
+        ...(attachment ? { attachment } : {}), ...(reply ? { reply_to: reply } : {}) };
   if (!payload.to && !payload.community) {
     setComposerFeedback("Seleziona una conversazione o un canale.", "error");
     return;
@@ -3142,7 +3923,11 @@ function sendChatMessage() {
     setComposerFeedback("Messaggio non inviato: connessione non disponibile.", "error");
     return;
   }
+  const sentScope = activeScope();
   messageInput.value = "";
+  replyTarget = null;
+  renderReplyPreview();
+  clearDraft(sentScope);
   renderComposerEmoji();
   discardPendingAttachment();
   setComposerFeedback("", "");
@@ -3310,6 +4095,8 @@ logoutBtn.onclick = () => {
 messageInput.addEventListener("input", () => {
   renderComposerEmoji();
   updateSendButton();
+  saveDraft();
+  maybeSendTyping();
 });
 messageInput.addEventListener("scroll", syncComposerEmojiScroll);
 messageInput.addEventListener("keydown", event => {
@@ -3319,7 +4106,20 @@ messageInput.addEventListener("keydown", event => {
   }
 });
 sendBtn.addEventListener("click", sendChatMessage);
-el("searchButton").setAttribute("aria-label", "Cerca contatti o partecipanti");
+el("searchButton").addEventListener("click", () => toggleMsgSearch());
+el("msgSearchClose").addEventListener("click", () => toggleMsgSearch(false));
+let msgSearchDebounce = null;
+el("msgSearchInput").addEventListener("input", () => {
+  clearTimeout(msgSearchDebounce);
+  msgSearchDebounce = setTimeout(runMsgSearch, 350);
+});
+el("msgSearchInput").addEventListener("keydown", event => {
+  if (event.key === "Enter") {
+    clearTimeout(msgSearchDebounce);
+    runMsgSearch();
+  }
+  if (event.key === "Escape") toggleMsgSearch(false);
+});
 el("microphoneButton").title = "Apri test microfono";
 el("microphoneButton").setAttribute("aria-label", "Apri test microfono");
 
@@ -3468,6 +4268,7 @@ function onMessage(event) {
       break;
 
     case "community_data":
+      if (m.community?.id) communityDataCache.set(m.community.id, m.community);
       renderCommunitySnapshot(m.community);
       if (m.community && (
         pendingGroupSelection ||
@@ -3480,7 +4281,7 @@ function onMessage(event) {
 
     case "community_history":
       if (m.community === currentCommunityId && m.channel === currentChannelId) {
-        renderCommunityHistory(m.messages || []);
+        renderCommunityHistory(m.messages || [], m.read_ts || 0);
       }
       break;
 
@@ -3496,8 +4297,25 @@ function onMessage(event) {
         `${senderName}: ${String(msg?.text || "").slice(0, 120)}`,
         isSelf,
       );
-      if (m.community === currentCommunityId && m.channel === currentChannelId) {
-        appendCommunityMessage(msg);
+      const scope = rememberScope({
+        kind: "community", community: m.community, channel: m.channel,
+        key: `c:${m.community}:${m.channel}`,
+      });
+      if (msg?.id) {
+        upsertCachedMessage(scope.key, msg);
+        trimCache(scope.key);
+      }
+      if (m.community === currentCommunityId && m.channel === currentChannelId && msg?.id) {
+        const node = messages.querySelector(`.msg[data-msg-id="${CSS.escape(String(msg.id))}"]`);
+        if (!node) {
+          const div = buildMessageEl(msg, scope);
+          appendToMessages(div);
+          maybeRequestLinkPreview(div, msg);
+          renderPinnedBar(scope);
+          scrollBottom();
+        }
+        reportRead(scope);
+        updateTypingIndicator();
       }
       break;
     }
@@ -3618,22 +4436,125 @@ function onMessage(event) {
       break;
 
     case "history":
-      renderHistory(m.msgs || [], m.with);
+      renderHistory(m.msgs || [], m.with, m.read_ts || 0);
       break;
 
     case "dm": {
-      const from = m.from || m.id;
-      const isSelf = String(from || "").toLowerCase() === String(me?.id || "").toLowerCase();
+      const from = m.from || "";
+      const isSelf = String(from).toLowerCase() === String(me?.id || "").toLowerCase();
+      const peer = isSelf ? String(m.to || "").toLowerCase() : String(from).toLowerCase();
       onIncomingMessage(
-        `dm:${String(from).toLowerCase()}`,
+        `dm:${peer}`,
         contactProfile(from)?.name || from || "Sconosciuto",
         contactProfile(from)?.name || from || "CiaoChat",
-        String(m.text || (m.attachment ? "[allegato]" : "")).slice(0, 120),
+        String(m.text || (m.attachment ? "[allegato]" : "") || (m.voice ? "[vocale]" : "")).slice(0, 120),
         isSelf,
       );
-      appendMessage(from, m.text, isSelf ? "self" : "other", m.ts, false, m.attachment);
+      if (m.id && peer) {
+        const scope = rememberScope({ kind: "dm", with: peer, key: `dm:${peer}` });
+        upsertCachedMessage(scope.key, m);
+        trimCache(scope.key);
+        const active = activeScope();
+        if (active?.kind === "dm" && active.with === peer) {
+          const node = messages.querySelector(`.msg[data-msg-id="${CSS.escape(String(m.id))}"]`);
+          if (!node) {
+            const div = buildMessageEl(m, scope);
+            appendToMessages(div);
+            maybeRequestLinkPreview(div, m);
+            renderPinnedBar(scope);
+            scrollBottom();
+          }
+          reportRead(scope);
+          updateTypingIndicator();
+        }
+      }
       break;
     }
+
+    case "msg_updated": {
+      const scopeKey = m.scope === "community" ? `c:${m.community}:${m.channel}` : `dm:${String(m.with || "").toLowerCase()}`;
+      patchCachedMessage(scopeKey, m.id, { text: m.text, edited: true });
+      refreshMessageElement(scopeKey, m.id);
+      break;
+    }
+
+    case "msg_deleted": {
+      const scopeKey = m.scope === "community" ? `c:${m.community}:${m.channel}` : `dm:${String(m.with || "").toLowerCase()}`;
+      patchCachedMessage(scopeKey, m.id, { deleted: true, text: "", attachment: null, voice: null, reactions: {} });
+      const node = messages.querySelector(`.msg[data-msg-id="${CSS.escape(String(m.id))}"]`);
+      if (node) node.replaceWith(buildMessageEl(
+        (convoCaches.get(scopeKey) || []).find(item => item.id === m.id) || { id: m.id, deleted: true },
+        scopeFromKey(scopeKey) || activeScope()));
+      renderPinnedBar(scopeFromKey(scopeKey) || activeScope());
+      break;
+    }
+
+    case "msg_reactions": {
+      const scopeKey = m.scope === "community" ? `c:${m.community}:${m.channel}` : `dm:${String(m.with || "").toLowerCase()}`;
+      patchCachedMessage(scopeKey, m.id, { reactions: m.reactions || {} });
+      refreshMessageElement(scopeKey, m.id);
+      break;
+    }
+
+    case "msg_pinned": {
+      const scopeKey = m.scope === "community" ? `c:${m.community}:${m.channel}` : `dm:${String(m.with || "").toLowerCase()}`;
+      patchCachedMessage(scopeKey, m.id, { pinned: !!m.pinned });
+      refreshMessageElement(scopeKey, m.id);
+      const scope = scopeFromKey(scopeKey);
+      if (scope && activeScope()?.key === scope.key) renderPinnedBar(scope);
+      break;
+    }
+
+    case "typing":
+      if (m.from && m.from !== me?.id) {
+        showTyping(m);
+        expireTyping(typingScopeKey(m), m.from);
+      }
+      break;
+
+    case "read_receipt": {
+      const key = String(m.from || "").toLowerCase();
+      if (key && (peerReadTs[key] || 0) < (m.ts || 0)) {
+        peerReadTs[key] = m.ts || 0;
+        const scope = activeScope();
+        if (scope?.kind === "dm" && scope.with === key) {
+          messages.querySelectorAll(".msg.self").forEach(node => {
+            const id = node.dataset.msgId;
+            const msg = (convoCaches.get(scope.key) || []).find(item => item.id === id);
+            if (msg && msgSeconds(msg) <= peerReadTs[key]) {
+              const meta = node.querySelector(".meta");
+              if (meta && !meta.textContent.includes("Letto")) {
+                meta.textContent += meta.textContent ? " · Letto" : "Letto";
+              }
+            }
+          });
+        }
+      }
+      break;
+    }
+
+    case "msg_search":
+      if (activeScope()) renderSearchResults(m);
+      break;
+
+    case "msg_result": {
+      const scopeKey = m.scope === "community" ? `c:${m.community}:${m.channel}` : `dm:${String(m.with || "").toLowerCase()}`;
+      const scope = scopeFromKey(scopeKey);
+      if (m.message?.id) {
+        upsertCachedMessage(scopeKey, m.message);
+        trimCache(scopeKey);
+        const active = activeScope();
+        if (scope && active?.key === scope.key) {
+          renderConvoList(scope, convoCaches.get(scope.key) || [], activeReadTs);
+          jumpToMessage(scope, m.message.id);
+        }
+      }
+      break;
+    }
+
+    case "link_preview":
+      onLinkPreview(m);
+      break;
 
     case "profile":
       if (m.profile?.id === requestedProfileId) {
@@ -3764,8 +4685,11 @@ function onMessage(event) {
       break;
 
     case "status":
-      contacts = contacts.map(c => (c.id || c.username) === m.id ? { ...c, online: m.online } : c);
+      contacts = contacts.map(c => (c.id || c.username) === m.id
+        ? { ...c, online: m.online, ...(m.last_seen ? { last_seen: m.last_seen } : {}) }
+        : c);
       renderContacts();
+      updateConvStatus();
       if (currentCommunity?.participants?.some(person => person.id === m.id)) {
         currentCommunity.participants = currentCommunity.participants.map(person =>
           person.id === m.id ? { ...person, online: m.online } : person
@@ -3793,43 +4717,12 @@ function onMessage(event) {
   }
 }
 
-function renderHistory(msgs, withUser) {
-  messages.innerHTML = "";
-  if (msgs.length === 0) {
-    messages.appendChild(makePlaceholder("Nessun messaggio ancora."));
-  }
-  msgs.forEach(m => appendMessage(m.from, m.text, m.from?.toLowerCase() === me?.id ? "self" : "other", m.ts, true, m.attachment));
-  scrollBottom();
-}
-
-function appendMessage(from, text, kind, ts, silent, attachment = null) {
-  const div = document.createElement("div");
-  div.className = "msg " + kind;
-  const profile = contacts.find(c => (c.id || c.username) === from);
-  const meta = ts ? new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
-  if (kind !== "self") {
-    const author = document.createElement("strong");
-    author.className = "message-author name-style";
-    author.textContent = profile?.name || profile?.username || from || "";
-    styleName(author, profile);
-    div.appendChild(author);
-  }
-  appendRichText(div, text || "");
-  const renderedAttachment = renderMessageAttachment(attachment);
-  if (renderedAttachment) div.appendChild(renderedAttachment);
-  const metadata = document.createElement("span");
-  metadata.className = "meta";
-  metadata.textContent = meta;
-  div.appendChild(metadata);
-  if (!silent) messages.appendChild(div);
-  else {
-    // insert before placeholder if present
-    const placeholder = messages.querySelector(".msg-placeholder");
-    if (placeholder) messages.insertBefore(div, placeholder);
-    else messages.appendChild(div);
-  }
-  revealMotionItems(div);
-  if (!silent) scrollBottom();
+function renderHistory(msgs, withUser, readTs = 0) {
+  const scope = activeScope()?.kind === "dm"
+    ? activeScope()
+    : { kind: "dm", with: String(withUser || "").toLowerCase(),
+        key: `dm:${String(withUser || "").toLowerCase()}` };
+  renderConvoList(scope, msgs || [], readTs);
 }
 
 function makePlaceholder(text) {

@@ -13,7 +13,8 @@ PyChat Ultimate Messenger - SERVER
 
 Comandi client -> server (campo "t"):
     register, login, resume, logout, add_contact, dm, history, profile,
-    media_put, media_get, c_invite, c_accept, c_end, c_audio, c_video
+    media_put, media_get, c_invite, c_accept, c_end, c_audio, c_video,
+    msg_edit, msg_delete, msg_react, msg_pin, typing, msg_read, msg_search, msg_get, link_preview
 
 Avvio:
     pip install firebase-admin
@@ -388,7 +389,8 @@ def public_profile(key):
             "avatar": rec.get("avatar"),
             "avatar_type": rec.get("avatar_type"), "banner": rec.get("banner"),
             "banner_type": rec.get("banner_type"), "name_color": rec.get("name_color", "#f1f5f9"),
-            "name_animation": rec.get("name_animation", "none"), "online": key in online}
+            "name_animation": rec.get("name_animation", "none"), "online": key in online,
+            "last_seen": rec.get("last_seen")}
 
 
 def contacts_of(key):
@@ -408,8 +410,17 @@ def add_contact_link(owner, contact):
 
 
 # ============================================================== autenticazione
+def touch_last_seen(key):
+    if key:
+        try:
+            fb_update(f"users/{key}", {"last_seen": now()})
+        except Exception:
+            pass
+
+
 def finish_login(conn, key, rec, token):
     conn.user, conn.name, conn.token_hash = key, rec["username"], token_hash(token)
+    touch_last_seen(key)
     with lock:
         first = key not in online
         online.setdefault(key, []).append(conn)
@@ -576,13 +587,33 @@ def handle_add_contact(conn, m):
     conn.send({"t": "contact_added", "contact": public_profile(target)})
 
 
-def store_message(frm, to, text, voice=None, attachment=None):
+def clean_reply_to(value):
+    if not isinstance(value, dict):
+        return None
+    mid = str(value.get("id", ""))[:80]
+    if not mid:
+        return None
+    sender = resolve_user_key(value.get("from")) or str(value.get("from", ""))[:40]
+    return {"id": mid, "from": sender, "text": str(value.get("text", ""))[:300]}
+
+
+def clean_forwarded_from(value):
+    sender = resolve_user_key(value) or str(value or "")[:40]
+    return sender or None
+
+
+def store_message(frm, to, text, voice=None, attachment=None, reply_to=None, forwarded_from=None):
     """Salva un messaggio su Firebase e lo recapita a tutti i dispositivi dei due utenti."""
     msg = {"from": frm, "to": to, "text": text, "ts": now()}
     if voice:
         msg["voice"] = voice
     if attachment:
         msg["attachment"] = attachment
+    if reply_to:
+        msg["reply_to"] = reply_to
+    if forwarded_from:
+        msg["forwarded"] = True
+        msg["forwarded_from"] = forwarded_from
     pushed = firebase_ref(f"messages/{pair_key(frm, to)}").push(msg)
     out = dict(msg, t="dm", id=pushed.key)
     send_to(frm, out)
@@ -648,7 +679,9 @@ def handle_dm(conn, m):
         return conn.send({"t": "err", "text": "Questo utente accetta messaggi solo dai contatti."})
     if dm_policy == "friends_group" and not is_friend and not share_community(conn.user, to):
         return conn.send({"t": "err", "text": "Questo utente accetta messaggi solo da contatti o membri degli stessi gruppi."})
-    store_message(conn.user, to, text, voice, attachment)
+    store_message(conn.user, to, text, voice, attachment,
+                  reply_to=clean_reply_to(m.get("reply_to")),
+                  forwarded_from=clean_forwarded_from(m.get("forwarded_from")))
 
 
 def handle_history(conn, m):
@@ -661,7 +694,9 @@ def handle_history(conn, m):
     for k, v in fb_last(f"messages/{pair_key(conn.user, other)}", HISTORY_LIMIT):
         if isinstance(v, dict):
             msgs.append(dict(v, id=k))
-    conn.send({"t": "history", "with": other, "msgs": msgs})
+    read_ts = fb_get(f"read_markers/{conn.user}/dm/{other}")
+    conn.send({"t": "history", "with": other, "msgs": msgs,
+               "read_ts": read_ts if isinstance(read_ts, (int, float)) else 0})
 
 
 def handle_profile(conn, m):
@@ -2149,6 +2184,13 @@ def handle_community_channel_send(conn, m):
     }
     if attachment:
         message["attachment"] = attachment
+    reply_to = clean_reply_to(m.get("reply_to"))
+    if reply_to:
+        message["reply_to"] = reply_to
+    forwarded_from = clean_forwarded_from(m.get("forwarded_from"))
+    if forwarded_from:
+        message["forwarded"] = True
+        message["forwarded_from"] = forwarded_from
     message_id = firebase_ref(f"communities/{community_id}/messages/{channel_id}").push(message).key
     payload = {"t": "community_message", "community": community_id, "channel": channel_id,
                "message": dict(message, id=message_id)}
@@ -2173,8 +2215,287 @@ def handle_community_channel_history(conn, m):
         )
         if isinstance(message, dict)
     ]
+    read_ts = fb_get(f"read_markers/{conn.user}/c/{community_id}/{channel_id}")
     conn.send({"t": "community_history", "community": community_id, "channel": channel_id,
-               "messages": messages})
+               "messages": messages,
+               "read_ts": read_ts if isinstance(read_ts, (int, float)) else 0})
+
+
+# ============================================================== messaggi: reazioni, modifica, eliminazione, pin, stato di lettura, ricerca
+
+def community_broadcast(community_id, payload):
+    members = fb_get(f"communities/{community_id}/members") or {}
+    if isinstance(members, dict):
+        for user_id in members:
+            send_to(user_id, payload)
+
+
+def message_scope(conn, m):
+    """Risolve l'ambito di un messaggio (DM o canale community) con i controlli di accesso.
+    Ritorna (kind, path, info, permissions) o None."""
+    if m.get("scope") == "community" or (m.get("community") and m.get("channel")):
+        community_id = valid_community_id(m.get("community"))
+        channel_id = valid_community_id(m.get("channel"))
+        if not community_id or not channel_id:
+            return None
+        permissions = require_community_permission(conn, community_id, "view_channels", channel_id)
+        if not permissions:
+            return None
+        return ("community", f"communities/{community_id}/messages/{channel_id}",
+                {"community": community_id, "channel": channel_id}, permissions)
+    other = str(m.get("with", "")).strip().lower()
+    if not USERNAME_RE.match(other) or is_blocked(conn.user, other):
+        return None
+    return ("dm", f"messages/{pair_key(conn.user, other)}", {"with": other}, None)
+
+
+def scope_notify(kind, info, payload):
+    base = {"t": payload.pop("t"), "scope": kind}
+    base.update(info)
+    base.update(payload)
+    return base
+
+
+def handle_msg_edit(conn, m):
+    target = message_scope(conn, m)
+    if not target:
+        return
+    kind, path, info, _ = target
+    mid = str(m.get("id", ""))[:80]
+    text = str(m.get("text", "")).strip()[:MAX_TEXT]
+    if not mid or not text:
+        return
+    msg = fb_get(f"{path}/{mid}")
+    if not isinstance(msg, dict) or msg.get("from") != conn.user or msg.get("deleted"):
+        return conn.send({"t": "err", "text": "Puoi modificare solo i tuoi messaggi."})
+    fb_update(f"{path}/{mid}", {"text": text, "edited": True})
+    patch = scope_notify(kind, info, {"t": "msg_updated", "id": mid, "text": text, "edited": True})
+    if kind == "community":
+        community_broadcast(info["community"], patch)
+    else:
+        send_to(conn.user, patch)
+        send_to(info["with"], patch)
+
+
+def handle_msg_delete(conn, m):
+    target = message_scope(conn, m)
+    if not target:
+        return
+    kind, path, info, permissions = target
+    mid = str(m.get("id", ""))[:80]
+    if not mid:
+        return
+    msg = fb_get(f"{path}/{mid}")
+    if not isinstance(msg, dict) or msg.get("deleted"):
+        return conn.send({"t": "err", "text": "Messaggio non trovato."})
+    allowed = msg.get("from") == conn.user
+    if kind == "community" and not allowed:
+        allowed = bool(permissions.get("manage_messages") or permissions.get("administrator"))
+    if not allowed:
+        return conn.send({"t": "err", "text": "Non puoi eliminare questo messaggio."})
+    fb_update(f"{path}/{mid}", {"deleted": True, "text": "", "voice": None, "attachment": None})
+    patch = scope_notify(kind, info, {"t": "msg_deleted", "id": mid})
+    if kind == "community":
+        community_broadcast(info["community"], patch)
+    else:
+        send_to(conn.user, patch)
+        send_to(info["with"], patch)
+
+
+def handle_msg_react(conn, m):
+    target = message_scope(conn, m)
+    if not target:
+        return
+    kind, path, info, _ = target
+    mid = str(m.get("id", ""))[:80]
+    emoji = str(m.get("emoji", "")).strip()[:16]
+    if not mid or not emoji:
+        return
+    msg = fb_get(f"{path}/{mid}")
+    if not isinstance(msg, dict) or msg.get("deleted"):
+        return conn.send({"t": "err", "text": "Messaggio non trovato."})
+    reactions = msg.get("reactions") if isinstance(msg.get("reactions"), dict) else {}
+    reactions = {k: [u for u in (v if isinstance(v, list) else []) if isinstance(u, str)]
+                 for k, v in reactions.items()}
+    users = reactions.get(emoji, [])
+    if conn.user in users:
+        users = [u for u in users if u != conn.user]
+    else:
+        users = users + [conn.user]
+    if users:
+        reactions[emoji] = users
+    else:
+        reactions.pop(emoji, None)
+    fb_update(f"{path}/{mid}", {"reactions": reactions})
+    patch = scope_notify(kind, info, {"t": "msg_reactions", "id": mid, "reactions": reactions})
+    if kind == "community":
+        community_broadcast(info["community"], patch)
+    else:
+        send_to(conn.user, patch)
+        send_to(info["with"], patch)
+
+
+def handle_msg_pin(conn, m):
+    target = message_scope(conn, m)
+    if not target:
+        return
+    kind, path, info, permissions = target
+    mid = str(m.get("id", ""))[:80]
+    pinned = bool(m.get("pinned", True))
+    if not mid:
+        return
+    msg = fb_get(f"{path}/{mid}")
+    if not isinstance(msg, dict) or msg.get("deleted"):
+        return conn.send({"t": "err", "text": "Messaggio non trovato."})
+    if kind == "community" and not (permissions.get("manage_messages") or permissions.get("administrator")):
+        return conn.send({"t": "err", "text": "Non puoi fissare messaggi in questo canale."})
+    fb_update(f"{path}/{mid}", {"pinned": True} if pinned else {"pinned": None})
+    patch = scope_notify(kind, info, {"t": "msg_pinned", "id": mid, "pinned": pinned})
+    if kind == "community":
+        community_broadcast(info["community"], patch)
+    else:
+        send_to(conn.user, patch)
+        send_to(info["with"], patch)
+
+
+def handle_typing(conn, m):
+    if m.get("community") and m.get("channel"):
+        community_id = valid_community_id(m.get("community"))
+        channel_id = valid_community_id(m.get("channel"))
+        if not community_id or not channel_id:
+            return
+        permissions = community_permissions(community_id, conn.user, channel_id)
+        if not (permissions.get("view_channels") or permissions.get("administrator")):
+            return
+        community_broadcast(community_id, {"t": "typing", "community": community_id,
+                                           "channel": channel_id, "from": conn.user})
+        return
+    other = str(m.get("with", "")).strip().lower()
+    if USERNAME_RE.match(other) and not is_blocked(conn.user, other):
+        send_to(other, {"t": "typing", "from": conn.user})
+
+
+def read_marker_set(user, scope_path, ts):
+    path = f"read_markers/{user}/{scope_path}"
+    current = fb_get(path)
+    if not isinstance(current, (int, float)) or ts > current:
+        fb_set(path, ts)
+
+
+def handle_msg_read(conn, m):
+    ts = m.get("ts")
+    ts = int(ts) if isinstance(ts, (int, float)) and not isinstance(ts, bool) else now()
+    ts = max(0, min(ts, now()))
+    if m.get("community") and m.get("channel"):
+        community_id = valid_community_id(m.get("community"))
+        channel_id = valid_community_id(m.get("channel"))
+        if not community_id or not channel_id:
+            return
+        read_marker_set(conn.user, f"c/{community_id}/{channel_id}", ts)
+        return
+    other = str(m.get("with", "")).strip().lower()
+    if not USERNAME_RE.match(other):
+        return
+    read_marker_set(conn.user, f"dm/{other}", ts)
+    if not is_blocked(conn.user, other):
+        send_to(other, {"t": "read_receipt", "from": conn.user, "ts": ts})
+
+
+def handle_msg_search(conn, m):
+    query = str(m.get("q", "")).strip().lower()[:100]
+    if len(query) < 2:
+        return conn.send({"t": "msg_search", "q": query, "results": []})
+    target = message_scope(conn, m)
+    if not target:
+        return conn.send({"t": "msg_search", "q": query, "results": []})
+    kind, path, info, _ = target
+    matches = []
+    for key, value in fb_last(path, 500):
+        if not isinstance(value, dict) or value.get("deleted"):
+            continue
+        text = str(value.get("text", ""))
+        if query in text.lower():
+            matches.append({
+                "id": key, "from": value.get("from"), "text": text[:200],
+                "ts": value.get("ts") or value.get("timestamp"),
+            })
+    matches = matches[-50:][::-1]
+    conn.send({"t": "msg_search", "q": query, "results": matches, "scope": kind, **info})
+
+
+def handle_msg_get(conn, m):
+    target = message_scope(conn, m)
+    if not target:
+        return conn.send({"t": "err", "text": "Messaggio non trovato."})
+    kind, path, info, _ = target
+    mid = str(m.get("id", ""))[:80]
+    msg = fb_get(f"{path}/{mid}")
+    if not isinstance(msg, dict):
+        return conn.send({"t": "err", "text": "Messaggio non trovato."})
+    conn.send({"t": "msg_result", "scope": kind, **info,
+               "message": dict(msg, id=mid)})
+
+
+# ============================================================== anteprime link
+
+link_preview_cache = {}
+LINK_PREVIEW_TTL = 3600
+LINK_PREVIEW_MAX = 50
+
+
+def meta_content(html, prop):
+    for match in re.finditer(r"<meta\b[^>]*>", html, re.I):
+        tag = match.group(0).lower()
+        if prop not in tag:
+            continue
+        content = re.search(r"content=[\"']([^\"']*)", tag, re.I)
+        if content:
+            return content.group(1).strip()[:300]
+    return None
+
+
+def fetch_link_preview(url):
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return None
+    host = parsed.hostname.lower()
+    if host == "localhost" or host.endswith(".local") or host.endswith(".internal"):
+        return None
+    try:
+        request = urllib.request.Request(url, headers={
+            "User-Agent": "CiaoChatLinkPreview/1.0", "Accept": "text/html",
+        })
+        with urllib.request.urlopen(request, timeout=6) as response:
+            if "html" not in (response.headers.get("Content-Type") or ""):
+                return None
+            html = response.read(400_000).decode("utf-8", "replace")
+    except (OSError, ValueError, urllib.error.URLError):
+        return None
+    title = (meta_content(html, "og:title") or meta_content(html, "twitter:title")
+             or (re.search(r"<title[^>]*>([^<]+)", html, re.I) or [None, ""])[1].strip())
+    description = (meta_content(html, "og:description") or meta_content(html, "description")
+                   or meta_content(html, "twitter:description"))
+    image = meta_content(html, "og:image") or meta_content(html, "twitter:image")
+    if image and image.startswith("/"):
+        image = urllib.parse.urljoin(url, image)
+    if not title and not description:
+        return None
+    return {"title": title[:300] if title else "", "description": (description or "")[:500],
+            "image": image[:1000] if image else None}
+
+
+def handle_link_preview(conn, m):
+    url = str(m.get("url", ""))[:2000].strip()
+    if not url.startswith(("http://", "https://")):
+        return
+    cached = link_preview_cache.get(url)
+    if cached and time.time() - cached[0] < LINK_PREVIEW_TTL:
+        return conn.send({"t": "link_preview", "url": url, "preview": cached[1]})
+    preview = fetch_link_preview(url)
+    if len(link_preview_cache) >= LINK_PREVIEW_MAX:
+        link_preview_cache.clear()
+    link_preview_cache[url] = (time.time(), preview)
+    conn.send({"t": "link_preview", "url": url, "preview": preview})
 
 
 def handle_profile_customization(conn, m):
@@ -2454,6 +2775,11 @@ def serve(conn):
 
 
 def dispatch(conn, m, t):
+    if conn.user:
+        last_touch = getattr(conn, "_last_seen_touch", 0)
+        if now() - last_touch > 60:
+            conn._last_seen_touch = now()
+            touch_last_seen(conn.user)
     if not conn.user:
         if t == "register":
             handle_register(conn, m)
@@ -2557,6 +2883,24 @@ def dispatch(conn, m, t):
         handle_community_channel_send(conn, m)
     elif t == "community_channel_history":
         handle_community_channel_history(conn, m)
+    elif t == "msg_edit":
+        handle_msg_edit(conn, m)
+    elif t == "msg_delete":
+        handle_msg_delete(conn, m)
+    elif t == "msg_react":
+        handle_msg_react(conn, m)
+    elif t == "msg_pin":
+        handle_msg_pin(conn, m)
+    elif t == "typing":
+        handle_typing(conn, m)
+    elif t == "msg_read":
+        handle_msg_read(conn, m)
+    elif t == "msg_search":
+        handle_msg_search(conn, m)
+    elif t == "msg_get":
+        handle_msg_get(conn, m)
+    elif t == "link_preview":
+        handle_link_preview(conn, m)
     elif t.startswith("c_"):
         handle_call(conn, m)
     elif t == "logout":
@@ -2569,6 +2913,7 @@ def disconnect(conn):
             end_call(cid, "dropped")
     went_offline = False
     if conn.user:
+        touch_last_seen(conn.user)
         with lock:
             lst = online.get(conn.user, [])
             if conn in lst:
@@ -2579,7 +2924,7 @@ def disconnect(conn):
         log(f"{conn.name} disconnesso")
     conn.close()
     if went_offline:
-        broadcast({"t": "status", "id": conn.user, "online": False})
+        broadcast({"t": "status", "id": conn.user, "online": False, "last_seen": now()})
 
 
 def main():
