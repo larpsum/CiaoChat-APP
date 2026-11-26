@@ -14,7 +14,21 @@ PyChat Ultimate Messenger - SERVER
 Comandi client -> server (campo "t"):
     register, login, resume, logout, add_contact, dm, history, profile,
     media_put, media_get, c_invite, c_accept, c_end, c_audio, c_video,
-    msg_edit, msg_delete, msg_react, msg_pin, typing, msg_read, msg_search, msg_get, link_preview
+    msg_edit, msg_delete, msg_react, msg_pin, typing, msg_read, msg_search, msg_get, link_preview,
+    e2ee_pub, admin, community_*, bookmark_*, msg_schedule, msg_expire, msg_vote,
+    status_post, status_delete, status_list, badge_update, relationship_update, block_update
+
+Crittografia end-to-end (DM di testo):
+    I messaggi DM di testo possono portare il campo "enc" con payload cifrato
+    "e1.<iv>.<ct>" (AES-256-GCM, chiave derivata da ECDH P-256 tra le chiavi
+    pubbliche degli utenti, pubblicate in profilo come "e2.<pubkey>"). Il server
+    tratta "enc" come dato opaco: lo memorizza e lo inoltra senza decifrarlo.
+    Non copre: canali community, sondaggi, allegati, messaggi vocali e metadati.
+
+Amministrazione:
+    Imposta PYCHAT_ADMIN_TOKEN e invia {"t":"admin","key":<token>,"action":...}.
+    Azioni: stats, user (con "user":<username>), logout (force-disconnect),
+    broadcast (con "text"). Vedi admin.py per un client a riga di comando.
 
 Avvio:
     pip install firebase-admin
@@ -71,6 +85,7 @@ MAX_TOKENS_PER_USER = 5
 HISTORY_LIMIT = 200
 PAGE_SIZE = 50                     # dimensione di una pagina di cronologia (carica altri)
 MAX_TEXT = 2000
+MAX_ENC = 16_000                   # byte massimi di un payload E2EE (base64url)
 MAX_SCHEDULE_SECONDS = 30 * 86400  # un messaggio puo' essere programmato al massimo tra 30 giorni
 MAX_TTL_SECONDS = 30 * 86400       # auto-eliminazione automatica di un messaggio
 MAX_LINE = 2_500_000                 # byte massimi per riga JSON (un vocale in base64 sta largamente dentro)
@@ -246,14 +261,17 @@ def fb_page(path, before=None, limit=PAGE_SIZE):
 
 
 def fb_due(node, field, limit=50):
-    """Figli di `node` il cui campo `field` e' <= now, ordinati per quel campo."""
-    data = (firebase_ref(node).order_by_child(field)
-            .start_at(0).end_at(now()).limit_to_first(limit).get())
-    if not data:
+    """Figli di `node` il cui campo `field` e' <= now, ordinati per quel campo.
+    Legge tutto il nodo e filtra in locale: le code `scheduled`/`expiring` sono
+    piccole e cosi' non servono indici `.indexOn` nelle regole RTDB."""
+    data = firebase_ref(node).get()
+    if not isinstance(data, dict):
         return []
-    if isinstance(data, list):
-        return [(str(i), v) for i, v in enumerate(data) if isinstance(v, dict)]
-    return [(k, v) for k, v in data.items() if isinstance(v, dict)]
+    due = [(k, v) for k, v in data.items()
+           if isinstance(v, dict) and isinstance(v.get(field), (int, float))
+           and v[field] <= now()]
+    due.sort(key=lambda item: item[1][field])
+    return due[:limit]
 
 
 def init_firebase():
@@ -403,6 +421,7 @@ def broadcast(obj):
         conns = [c for lst in online.values() for c in lst]
     for c in conns:
         c.send(obj)
+    return len(conns)
 
 
 # ============================================================== profili e rubrica
@@ -427,7 +446,9 @@ def public_profile(key):
             "avatar_type": rec.get("avatar_type"), "banner": rec.get("banner"),
             "banner_type": rec.get("banner_type"), "name_color": rec.get("name_color", "#f1f5f9"),
             "name_animation": rec.get("name_animation", "none"), "online": key in online,
-            "last_seen": rec.get("last_seen")}
+            "last_seen": rec.get("last_seen"), "e2ee_pub": rec.get("e2ee_pub"),
+            "verification": (rec.get("verification") or {}).get("tier")
+                            if isinstance(rec.get("verification"), dict) else None}
 
 
 def contacts_of(key):
@@ -676,6 +697,16 @@ def clean_ttl(value):
     return None
 
 
+def clean_enc(value):
+    """Payload cifrato E2EE: 'e1.<iv>.<ct>' in base64url. Opaco per il server."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if len(value) > MAX_ENC or not re.fullmatch(r"e1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", value):
+        return None
+    return value
+
+
 def expiry_node_id(path, mid):
     return hashlib.sha256(f"{path}/{mid}".encode("utf-8")).hexdigest()[:32]
 
@@ -693,9 +724,11 @@ def clear_expiry(path, mid):
 
 
 def store_message(frm, to, text, voice=None, attachment=None, reply_to=None,
-                  forwarded_from=None, poll=None, expires_at=None):
+                  forwarded_from=None, poll=None, expires_at=None, enc=None):
     """Salva un messaggio su Firebase e lo recapita a tutti i dispositivi dei due utenti."""
     msg = {"from": frm, "to": to, "text": text, "ts": now()}
+    if enc:
+        msg["enc"] = enc
     if voice:
         msg["voice"] = voice
     if attachment:
@@ -776,36 +809,39 @@ def dm_policy_error(frm, to):
 def handle_dm(conn, m):
     to = str(m.get("to", "")).strip().lower()
     text = str(m.get("text", "")).strip()[:MAX_TEXT]
+    enc = clean_enc(m.get("enc"))
     voice = clean_voice(m.get("voice"))
     attachment = clean_attachment(m.get("attachment"))
     poll = clean_poll(m.get("poll"))
     if m.get("attachment") is not None and attachment is None:
         return conn.send({"t": "err", "text": "Allegato non valido o non più disponibile."})
-    if voice and not text and not poll:
+    if m.get("enc") is not None and enc is None:
+        return conn.send({"t": "err", "text": "Messaggio cifrato non valido."})
+    if voice and not text and not poll and not enc:
         text = "\U0001F3A4 Messaggio vocale"
     if to == conn.user or not USERNAME_RE.match(to):
         return
     err = dm_policy_error(conn.user, to)
     if err:
         return conn.send({"t": "err", "text": err})
-    if not text and not voice and not attachment and not poll:
+    if not text and not voice and not attachment and not poll and not enc:
         return
     reply_to = clean_reply_to(m.get("reply_to"))
     forwarded_from = clean_forwarded_from(m.get("forwarded_from"))
     send_at = clean_send_at(m.get("send_at"))
-    ttl = clean_ttl(m.get("ttl"))
+    ttl = clean_ttl(m.get("ttl")) or conv_dm_ttl(conn.user, to)
     expires_at = now() + ttl if ttl else None
     if send_at:
         fb_set(f"scheduled/{secrets.token_hex(8)}", {
             "kind": "dm", "from": conn.user, "to": to, "text": text,
             "voice": voice, "attachment": attachment, "reply_to": reply_to,
             "forwarded_from": forwarded_from, "poll": poll,
-            "expires_at": expires_at, "send_at": send_at,
+            "expires_at": expires_at, "send_at": send_at, "enc": enc,
         })
         return conn.send({"t": "msg_scheduled", "scope": "dm", "with": to, "send_at": send_at})
     store_message(conn.user, to, text, voice, attachment,
                   reply_to=reply_to, forwarded_from=forwarded_from,
-                  poll=poll, expires_at=expires_at)
+                  poll=poll, expires_at=expires_at, enc=enc)
 
 
 def handle_history(conn, m):
@@ -824,6 +860,7 @@ def handle_history(conn, m):
     conn.send({"t": "history", "with": other, "msgs": msgs,
                "has_more": has_more, "oldest": oldest,
                "read_ts": read_ts if isinstance(read_ts, (int, float)) else 0,
+               "conv_ttl": conv_dm_ttl(conn.user, other),
                **({"before": before} if before else {})})
 
 
@@ -855,6 +892,8 @@ def account_settings(key, rec=None):
         }),
         "avatar": rec.get("avatar"),
         "banner": rec.get("banner"),
+        "verification": (rec.get("verification") or {}).get("tier")
+                        if isinstance(rec.get("verification"), dict) else None,
         "two_factor_enabled": bool(rec.get("two_factor_enabled")),
     }
 
@@ -1028,8 +1067,10 @@ def handle_account_update(conn, m):
         return conn.send({"t": "err", "text": "Il nome visualizzato deve contenere da 1 a 32 caratteri."})
     if email and (len(email) > 254 or not EMAIL_RE.fullmatch(email)):
         return conn.send({"t": "err", "text": "Indirizzo email non valido."})
-    if len(bio) > 160 or len(status) > 80:
-        return conn.send({"t": "err", "text": "La biografia o lo stato supera il limite consentito."})
+    tier = verification_tier(key)
+    bio_max = {"blue": 240, "black": 320, "rainbow": 500}.get(tier, 160)
+    if len(bio) > bio_max or len(status) > 80:
+        return conn.send({"t": "err", "text": f"La biografia o lo stato supera il limite consentito ({bio_max} caratteri per la bio)."})
     if isinstance(expiration, bool) or not isinstance(expiration, int) or expiration not in STATUS_EXPIRATIONS:
         return conn.send({"t": "err", "text": "Scadenza dello stato non valida."})
     if status and expiration:
@@ -2379,6 +2420,95 @@ def handle_community_channel_history(conn, m):
                **({"before": before} if before else {})})
 
 
+E2EE_PUB_RE = re.compile(r"^e2\.[A-Za-z0-9_-]{80,200}$")
+
+
+def handle_e2ee_pub(conn, m):
+    """Pubblica la chiave pubblica ECDH P-256 (punto non compresso, base64url)."""
+    pub = str(m.get("pub", "")).strip()
+    if not E2EE_PUB_RE.match(pub):
+        return conn.send({"t": "err", "text": "Chiave pubblica non valida."})
+    fb_update(f"users/{conn.user}", {"e2ee_pub": pub})
+    profile = public_profile(conn.user)
+    broadcast({"t": "profile_update", "profile": profile})
+    broadcast({"t": "USER_UPDATED", "id": conn.user, "profile": profile})
+    conn.send({"t": "e2ee_pub_ok"})
+
+
+# ============================================================== admin (backend)
+
+ADMIN_TOKEN = os.environ.get("PYCHAT_ADMIN_TOKEN", "")
+
+
+def admin_stats():
+    users = fb_get("users") or {}
+    communities = fb_get("communities") or {}
+    scheduled = fb_get("scheduled") or {}
+    expiring = fb_get("expiring") or {}
+    media_bytes = 0
+    media_files = 0
+    try:
+        for entry in os.scandir(MEDIA_DIR):
+            if entry.is_file():
+                media_files += 1
+                media_bytes += entry.stat().st_size
+    except OSError:
+        pass
+    return {
+        "users": len(users) if isinstance(users, dict) else 0,
+        "online": len(online),
+        "conversations_pairs": len(fb_get("messages") or {}),
+        "communities": len(communities) if isinstance(communities, dict) else 0,
+        "scheduled_pending": len(scheduled) if isinstance(scheduled, dict) else 0,
+        "expiring_pending": len(expiring) if isinstance(expiring, dict) else 0,
+        "media_files": media_files,
+        "media_mb": round(media_bytes / 1_048_576, 1),
+        "calls_active": len(calls),
+    }
+
+
+def handle_admin(conn, m):
+    """Comandi admin: richiedono PYCHAT_ADMIN_TOKEN e la chiave nel messaggio."""
+    if not ADMIN_TOKEN:
+        return conn.send({"t": "err", "text": "Admin disabilitato su questo server."})
+    if not hmac.compare_digest(str(m.get("key", "")), ADMIN_TOKEN):
+        log(f"Admin: tentativo fallito da {conn.name}")
+        return conn.send({"t": "err", "text": "Non autorizzato."})
+    action = str(m.get("action", ""))
+    if action == "stats":
+        return conn.send({"t": "admin_stats", **admin_stats()})
+    target = resolve_user_key(m.get("user"))
+    if action == "user":
+        if not target:
+            return conn.send({"t": "err", "text": "Utente non trovato."})
+        rec = fb_get(f"users/{target}") or {}
+        contacts = fb_get(f"contacts/{target}") or {}
+        return conn.send({"t": "admin_user", "user": target,
+                          "username": rec.get("username"),
+                          "display_name": rec.get("display_name"),
+                          "created": rec.get("created"),
+                          "last_seen": rec.get("last_seen"),
+                          "online": target in online,
+                          "contacts": len(contacts) if isinstance(contacts, dict) else 0,
+                          "two_factor": bool(rec.get("two_factor_enabled"))})
+    if action == "logout":
+        if not target:
+            return conn.send({"t": "err", "text": "Utente non trovato."})
+        conns = list(online.get(target, []))
+        for other in conns:
+            other.send({"t": "err", "text": "Sessione terminata dall'amministratore."})
+            other.close()
+        online.pop(target, None)
+        return conn.send({"t": "admin_logout", "user": target, "closed": len(conns)})
+    if action == "broadcast":
+        text = str(m.get("text", "")).strip()[:MAX_TEXT]
+        if not text:
+            return conn.send({"t": "err", "text": "Testo non valido."})
+        sent = broadcast({"t": "admin_notice", "text": text})
+        return conn.send({"t": "admin_broadcast", "delivered": sent})
+    conn.send({"t": "err", "text": "Azione admin sconosciuta."})
+
+
 # ============================================================== messaggi: reazioni, modifica, eliminazione, pin, stato di lettura, ricerca
 
 def community_broadcast(community_id, payload):
@@ -2432,14 +2562,30 @@ def handle_msg_edit(conn, m):
     kind, path, info, _ = target
     mid = str(m.get("id", ""))[:80]
     text = str(m.get("text", "")).strip()[:MAX_TEXT]
-    if not mid or not text:
+    enc = clean_enc(m.get("enc"))
+    if m.get("enc") is not None and enc is None:
+        return conn.send({"t": "err", "text": "Messaggio cifrato non valido."})
+    if kind != "dm" and enc:
+        return conn.send({"t": "err", "text": "La cifratura end-to-end è disponibile solo nei messaggi diretti."})
+    if not mid or (not text and not enc):
         return
     msg = fb_get(f"{path}/{mid}")
     if not isinstance(msg, dict) or msg.get("from") != conn.user or msg.get("deleted"):
         return conn.send({"t": "err", "text": "Puoi modificare solo i tuoi messaggi."})
-    fb_update(f"{path}/{mid}", {"text": text, "edited": True})
+    edits = push_edit_history(msg)
+    update = {"edited": True, "edits": edits}
+    if kind == "dm" and enc:
+        update["text"] = ""
+        update["enc"] = enc
+    elif kind == "dm":
+        update["text"] = text
+        update["enc"] = None
+    else:
+        update["text"] = text
+    fb_update(f"{path}/{mid}", update)
     message_update_notify(conn, kind, info,
-                          {"t": "msg_updated", "id": mid, "text": text, "edited": True})
+                          {"t": "msg_updated", "id": mid, "text": text, "enc": enc,
+                           "edited": True, "edits": edits})
 
 
 def handle_msg_delete(conn, m):
@@ -2647,9 +2793,14 @@ def handle_msg_search(conn, m):
         if not isinstance(value, dict) or value.get("deleted"):
             continue
         text = str(value.get("text", ""))
-        if query in text.lower():
+        if query in search_haystack(value):
+            poll = value.get("poll") if isinstance(value.get("poll"), dict) else None
+            att = value.get("attachment") if isinstance(value.get("attachment"), dict) else None
+            snippet = text[:200] or (
+                f"[Sondaggio] {str(poll.get('q', ''))[:120]}" if poll
+                else f"[Allegato] {str(att.get('name', ''))[:120]}" if att else "")
             matches.append({
-                "id": key, "from": value.get("from"), "text": text[:200],
+                "id": key, "from": value.get("from"), "text": snippet,
                 "ts": value.get("ts") or value.get("timestamp"),
             })
     matches = matches[-50:][::-1]
@@ -2698,6 +2849,7 @@ def handle_bookmark(conn, m, action):
             return conn.send({"t": "err", "text": "Messaggio non trovato."})
         snap = {
             "from": msg.get("from"), "text": str(msg.get("text", ""))[:200],
+            "enc": msg.get("enc"),
             "ts": msg.get("ts") or msg.get("timestamp") or now(),
             "has_attachment": bool(msg.get("attachment")),
             "has_voice": bool(msg.get("voice")),
@@ -2708,6 +2860,259 @@ def handle_bookmark(conn, m, action):
     else:
         fb_delete(f"{base}/{mid}")
         conn.send({"t": "bookmark_removed", "scope": kind, **info, "id": mid})
+
+
+# ============================================================== messaggi programmati: lista/cancellazione
+
+def scheduled_item_public(item, sid):
+    kind = item.get("kind")
+    return {
+        "id": sid, "kind": kind, "send_at": item.get("send_at"),
+        "text": str(item.get("text", ""))[:80],
+        "with": item.get("to") if kind == "dm" else None,
+        "community": item.get("community") if kind == "community" else None,
+        "channel": item.get("channel") if kind == "community" else None,
+        "has_poll": bool(item.get("poll")),
+        "has_attachment": bool(item.get("attachment")),
+        "has_voice": bool(item.get("voice")),
+    }
+
+
+def handle_scheduled_list(conn, m):
+    raw = fb_get("scheduled") or {}
+    items = [scheduled_item_public(v, k) for k, v in raw.items()
+             if isinstance(v, dict) and v.get("from") == conn.user]
+    items.sort(key=lambda item: item.get("send_at") or 0)
+    conn.send({"t": "scheduled_list", "items": items[:100]})
+
+
+def handle_scheduled_cancel(conn, m):
+    sid = str(m.get("id", ""))[:80]
+    item = fb_get(f"scheduled/{sid}")
+    if not isinstance(item, dict) or item.get("from") != conn.user:
+        return conn.send({"t": "err", "text": "Messaggio programmato non trovato."})
+    fb_delete(f"scheduled/{sid}")
+    conn.send({"t": "scheduled_cancelled", "id": sid})
+
+
+# ============================================================== bozze sincronizzate tra dispositivi
+
+DRAFT_TEXT_MAX = 4000
+DRAFT_KEY_RE = re.compile(r"^[A-Za-z0-9:_.\-]{1,120}$")
+
+
+def draft_scope_key(m):
+    key = str(m.get("scope_key", ""))
+    return key if DRAFT_KEY_RE.match(key) else None
+
+
+def handle_draft_save(conn, m):
+    scope_key = draft_scope_key(m)
+    if not scope_key:
+        return conn.send({"t": "err", "text": "Bozza non valida."})
+    text = str(m.get("text", ""))[:DRAFT_TEXT_MAX]
+    if text.strip():
+        fb_set(f"drafts/{conn.user}/{scope_key}", {"text": text, "ts": now()})
+    else:
+        fb_delete(f"drafts/{conn.user}/{scope_key}")
+    conn.send({"t": "draft_saved", "scope_key": scope_key})
+
+
+def handle_draft_list(conn, m):
+    raw = fb_get(f"drafts/{conn.user}") or {}
+    drafts = {k: v.get("text", "") for k, v in raw.items()
+              if isinstance(v, dict) and isinstance(v.get("text"), str)} \
+        if isinstance(raw, dict) else {}
+    conn.send({"t": "draft_list", "drafts": drafts})
+
+
+# ============================================================== TTL di conversazione (DM)
+
+def conv_dm_ttl(a, b):
+    value = fb_get(f"dm_ttl/{pair_key(a, b)}")
+    if isinstance(value, (int, float)) and not isinstance(value, bool) \
+            and 60 <= int(value) <= MAX_TTL_SECONDS:
+        return int(value)
+    return None
+
+
+def handle_conv_ttl(conn, m):
+    other = str(m.get("with", "")).strip().lower()
+    if not USERNAME_RE.match(other):
+        return conn.send({"t": "err", "text": "Conversazione non valida."})
+    ttl = m.get("ttl")
+    ttl = int(ttl) if isinstance(ttl, (int, float)) and not isinstance(ttl, bool) else 0
+    if ttl:
+        if not (60 <= ttl <= MAX_TTL_SECONDS):
+            return conn.send({"t": "err", "text": "Scadenza non valida."})
+        fb_set(f"dm_ttl/{pair_key(conn.user, other)}", ttl)
+    else:
+        fb_delete(f"dm_ttl/{pair_key(conn.user, other)}")
+    conn.send({"t": "conv_ttl", "with": other, "ttl": ttl or None})
+
+
+# ============================================================== ricerca globale
+
+def search_haystack(value):
+    """Testo ricercabile di un messaggio: corpo + poll + allegato."""
+    parts = [str(value.get("text", ""))]
+    poll = value.get("poll")
+    if isinstance(poll, dict):
+        parts.append(str(poll.get("q", "")))
+        parts.extend(str(o.get("text", "")) for o in poll.get("options") or []
+                     if isinstance(o, dict))
+    att = value.get("attachment")
+    if isinstance(att, dict):
+        parts.append(str(att.get("name", "")))
+    return " ".join(parts).lower()
+
+
+def global_search_matches(path, query, limit=40):
+    out = []
+    for key, value in fb_last(path, 200):
+        if not isinstance(value, dict) or value.get("deleted"):
+            continue
+        hay = search_haystack(value)
+        if query in hay:
+            poll = value.get("poll") if isinstance(value.get("poll"), dict) else None
+            out.append({
+                "id": key, "from": value.get("from"),
+                "text": str(value.get("text", ""))[:200] or (f"[Sondaggio] {poll.get('q','')[:120]}" if poll else ""),
+                "ts": value.get("ts") or value.get("timestamp"),
+                "has_poll": bool(poll),
+            })
+    return out[-limit:][::-1]
+
+
+def handle_global_search(conn, m):
+    query = str(m.get("q", "")).strip().lower()[:100]
+    if len(query) < 2:
+        return conn.send({"t": "global_search", "q": query, "results": []})
+    results = []
+    contacts = fb_get(f"contacts/{conn.user}") or {}
+    if isinstance(contacts, dict):
+        for cid in list(contacts)[:60]:
+            for hit in global_search_matches(f"messages/{pair_key(conn.user, cid)}", query, 15):
+                results.append({"scope": "dm", "with": cid, **hit})
+    mine = fb_get(f"users/{conn.user}/communities") or {}
+    member_of = list(mine)[:40] if isinstance(mine, dict) else []
+    for cid in member_of:
+        channels = fb_get(f"communities/{cid}/channels") or {}
+        if not isinstance(channels, dict):
+            continue
+        for chan in list(channels)[:30]:
+            for hit in global_search_matches(
+                    f"communities/{cid}/messages/{chan}", query, 10):
+                results.append({"scope": "community", "community": cid,
+                                "channel": chan, **hit})
+    results.sort(key=lambda r: r.get("ts") or 0, reverse=True)
+    conn.send({"t": "global_search", "q": query, "results": results[:50]})
+
+
+# ============================================================== storico delle modifiche
+
+MAX_EDIT_HISTORY = 5
+
+
+def push_edit_history(msg):
+    """Aggiunge la versione precedente del testo allo storico (max 5 voci)."""
+    prev = str(msg.get("text") or "")
+    if not prev and msg.get("enc"):
+        prev = "[messaggio cifrato]"
+    history = list(msg.get("edits") or [])
+    if isinstance(history, list):
+        history.append({"text": prev[:MAX_TEXT], "ts": now()})
+        return history[-MAX_EDIT_HISTORY:]
+    return [{"text": prev[:MAX_TEXT], "ts": now()}]
+
+
+# ============================================================== stati temporanei (24h) e badge verificati
+
+STATUS_TTL = 24 * 3600
+STATUS_TEXT_MAX = 200
+STATUS_MAX_PER_USER = 10
+VERIFICATION_TIERS = {"blue": 10, "black": 25, "rainbow": 50}   # €/mese, simulato
+
+
+def verification_tier(key):
+    rec = fb_get(f"users/{key}/verification")
+    tier = rec.get("tier") if isinstance(rec, dict) else None
+    return tier if tier in VERIFICATION_TIERS else None
+
+
+def active_statuses(user_id):
+    """Stati non scaduti di un utente (max STATUS_MAX_PER_USER, i piu' recenti)."""
+    raw = fb_get(f"statuses/{user_id}") or {}
+    if not isinstance(raw, dict):
+        return []
+    now_ts = now()
+    out = [dict(item, id=sid) for sid, item in raw.items()
+           if isinstance(item, dict) and item.get("expires_at", 0) > now_ts]
+    out.sort(key=lambda item: item.get("ts", 0), reverse=True)
+    return out[:STATUS_MAX_PER_USER]
+
+
+def status_contacts(key):
+    """Contatti dell'utente con almeno uno stato attivo: {user_id: [stati]}."""
+    raw = fb_get(f"contacts/{key}") or {}
+    result = {}
+    if isinstance(raw, dict):
+        for cid in raw:
+            sts = active_statuses(cid)
+            if sts:
+                result[cid] = sts
+    return result
+
+
+def notify_status_contacts(user_id):
+    for cid in (fb_get(f"contacts/{user_id}") or {}):
+        send_to(cid, {"t": "status_update", "user": user_id})
+
+
+def handle_status_post(conn, m):
+    text = str(m.get("text", "")).strip()[:STATUS_TEXT_MAX]
+    if not text:
+        return conn.send({"t": "err", "text": "Testo dello stato non valido."})
+    ref = firebase_ref(f"statuses/{conn.user}").push({
+        "text": text, "ts": now(), "expires_at": now() + STATUS_TTL})
+    notify_status_contacts(conn.user)
+    conn.send({"t": "status_posted", "id": ref.key})
+
+
+def handle_status_delete(conn, m):
+    mid = str(m.get("id", ""))[:80]
+    if not mid or fb_get(f"statuses/{conn.user}/{mid}") is None:
+        return conn.send({"t": "err", "text": "Stato non trovato."})
+    fb_delete(f"statuses/{conn.user}/{mid}")
+    notify_status_contacts(conn.user)
+    conn.send({"t": "status_deleted", "id": mid})
+
+
+def handle_status_list(conn, m):
+    # purge pigra degli stati scaduti del proprio account
+    raw = fb_get(f"statuses/{conn.user}") or {}
+    if isinstance(raw, dict):
+        for sid, item in raw.items():
+            if isinstance(item, dict) and item.get("expires_at", 0) <= now():
+                fb_delete(f"statuses/{conn.user}/{sid}")
+    conn.send({"t": "status_list", "mine": active_statuses(conn.user),
+               "contacts": status_contacts(conn.user)})
+
+
+def handle_badge_update(conn, m):
+    """Badge verificato a pagamento (simulato): blue 10€, black 25€, rainbow 50€/mese."""
+    action = m.get("action")
+    if action == "cancel":
+        fb_delete(f"users/{conn.user}/verification")
+    else:
+        tier = str(m.get("tier", ""))
+        if tier not in VERIFICATION_TIERS:
+            return conn.send({"t": "err", "text": "Livello badge non valido."})
+        fb_set(f"users/{conn.user}/verification", {"tier": tier, "since": now()})
+    profile = public_profile(conn.user)
+    broadcast({"t": "profile_update", "profile": profile})
+    broadcast({"t": "USER_UPDATED", "id": conn.user, "profile": profile})
+    conn.send(settings_snapshot(conn))
 
 
 # ============================================================== scheduled messages & scadenze
@@ -2724,11 +3129,14 @@ def deliver_scheduled(item):
         if err:
             send_to(sender, {"t": "err", "text": f"Messaggio programmato non inviato: {err}"})
             return
+        conv_ttl = conv_dm_ttl(sender, to)
+        expires_at = item.get("expires_at") or (now() + conv_ttl if conv_ttl else None)
         store_message(sender, to, str(item.get("text", ""))[:MAX_TEXT],
                       voice=item.get("voice"), attachment=item.get("attachment"),
                       reply_to=item.get("reply_to"),
                       forwarded_from=item.get("forwarded_from"),
-                      poll=item.get("poll"), expires_at=item.get("expires_at"))
+                      poll=item.get("poll"), expires_at=expires_at,
+                      enc=item.get("enc"))
         send_to(sender, {"t": "msg_scheduled_sent", "scope": "dm", "with": to})
     elif kind == "community":
         community_id = valid_community_id(item.get("community"))
@@ -2863,6 +3271,8 @@ def handle_profile_customization(conn, m):
     animation = str(m.get("name_animation", ""))
     if not re.fullmatch(r"#[0-9a-fA-F]{6}", color) or animation not in NAME_ANIMATIONS:
         return conn.send({"t": "err", "text": "Stile del nome non valido."})
+    if animation == "rainbow" and verification_tier(conn.user) not in ("black", "rainbow"):
+        return conn.send({"t": "err", "text": "L'animazione arcobaleno richiede il badge Nero o Arcobaleno."})
     fb_update(f"users/{conn.user}", {"name_color": color.lower(), "name_animation": animation})
     profile = public_profile(conn.user)
     broadcast({"t": "profile_update", "profile": profile})
@@ -3226,6 +3636,8 @@ def dispatch(conn, m, t):
             handle_login(conn, m)
         elif t == "resume":
             handle_resume(conn, m)
+        elif t == "admin":
+            handle_admin(conn, m)
         else:
             conn.send({"t": "err", "text": "Effettua prima l'accesso."})
     elif t == "add_contact":
@@ -3350,6 +3762,30 @@ def dispatch(conn, m, t):
         handle_msg_get(conn, m)
     elif t == "link_preview":
         handle_link_preview(conn, m)
+    elif t == "e2ee_pub":
+        handle_e2ee_pub(conn, m)
+    elif t == "scheduled_list":
+        handle_scheduled_list(conn, m)
+    elif t == "scheduled_cancel":
+        handle_scheduled_cancel(conn, m)
+    elif t == "draft_save":
+        handle_draft_save(conn, m)
+    elif t == "draft_list":
+        handle_draft_list(conn, m)
+    elif t == "conv_ttl":
+        handle_conv_ttl(conn, m)
+    elif t == "global_search":
+        handle_global_search(conn, m)
+    elif t == "status_post":
+        handle_status_post(conn, m)
+    elif t == "status_delete":
+        handle_status_delete(conn, m)
+    elif t == "status_list":
+        handle_status_list(conn, m)
+    elif t == "badge_update":
+        handle_badge_update(conn, m)
+    elif t == "admin":
+        handle_admin(conn, m)
     elif t.startswith("c_"):
         handle_call(conn, m)
     elif t == "logout":

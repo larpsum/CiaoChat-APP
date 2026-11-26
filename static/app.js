@@ -399,7 +399,8 @@ function renderContacts() {
   visibleContacts.forEach(c => {
     const username = c.id || c.username;
     const item = document.createElement("li");
-    item.className = "contact-item" + (selectedContact === username ? " active" : "");
+    item.className = "contact-item" + (selectedContact === username ? " active" : "")
+      + (hasActiveStatus(username) ? " has-status" : "");
     item.tabIndex = 0;
     item.setAttribute("role", "button");
     item.setAttribute("aria-label", `Apri conversazione con ${c.name || c.username || username}`);
@@ -410,6 +411,7 @@ function renderContacts() {
     name.className = "contact-name name-style";
     name.textContent = c.name || c.username || username;
     styleName(name, c);
+    appendVerificationBadge(name, c);
     const status = document.createElement("div");
     status.className = "contact-status";
     status.textContent = c.online ? "Online"
@@ -766,7 +768,7 @@ function renderCommunityHistory(items, readTs = 0, meta = {}) {
 }
 
 function appendRichText(parent, text) {
-  const pattern = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|\*\*([^*\n]+)\*\*|\*([^*\n]+)\*|(https?:\/\/[^\s<>]+)/g;
+  const pattern = /```([\s\S]+?)```|\|\|([^|\n]+)\|\||`([^`\n]+)`|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|\*\*([^*\n]+)\*\*|\*([^*\n]+)\*|(https?:\/\/[^\s<>]+)/g;
   const value = String(text || "");
   const content = document.createElement("span");
   content.className = "message-body";
@@ -774,34 +776,52 @@ function appendRichText(parent, text) {
   for (const match of value.matchAll(pattern)) {
     const index = match.index ?? 0;
     if (index > cursor) content.appendChild(document.createTextNode(value.slice(cursor, index)));
-    if (match[1]) {
-      if (!localSettings.linkPreviews) {
-        content.appendChild(document.createTextNode(match[1]));
-      } else {
-        const link = document.createElement("a");
-        link.href = match[2];
-        link.target = "_blank";
-        link.rel = "noopener noreferrer";
-        link.textContent = match[1];
-        content.appendChild(link);
-      }
-    } else if (match[3]) {
-      const strong = document.createElement("strong");
-      strong.textContent = match[3];
-      content.appendChild(strong);
+    if (match[1] !== undefined) {
+      const pre = document.createElement("pre");
+      const code = document.createElement("code");
+      code.textContent = match[1].replace(/^\n+|\n+$/g, "");
+      pre.appendChild(code);
+      content.appendChild(pre);
+    } else if (match[2] !== undefined) {
+      const spoiler = document.createElement("span");
+      spoiler.className = "spoiler";
+      spoiler.textContent = match[2];
+      spoiler.title = "Clicca per rivelare";
+      spoiler.addEventListener("click", () => spoiler.classList.toggle("revealed"));
+      content.appendChild(spoiler);
+    } else if (match[3] !== undefined) {
+      const code = document.createElement("code");
+      code.className = "inline-code";
+      code.textContent = match[3];
+      content.appendChild(code);
     } else if (match[4]) {
-      const emphasis = document.createElement("em");
-      emphasis.textContent = match[4];
-      content.appendChild(emphasis);
-    } else {
       if (!localSettings.linkPreviews) {
-        content.appendChild(document.createTextNode(match[5]));
+        content.appendChild(document.createTextNode(match[4]));
       } else {
         const link = document.createElement("a");
         link.href = match[5];
         link.target = "_blank";
         link.rel = "noopener noreferrer";
-        link.textContent = match[5];
+        link.textContent = match[4];
+        content.appendChild(link);
+      }
+    } else if (match[6]) {
+      const strong = document.createElement("strong");
+      strong.textContent = match[6];
+      content.appendChild(strong);
+    } else if (match[7]) {
+      const emphasis = document.createElement("em");
+      emphasis.textContent = match[7];
+      content.appendChild(emphasis);
+    } else {
+      if (!localSettings.linkPreviews) {
+        content.appendChild(document.createTextNode(match[8]));
+      } else {
+        const link = document.createElement("a");
+        link.href = match[8];
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.textContent = match[8];
         content.appendChild(link);
       }
     }
@@ -1162,6 +1182,7 @@ function buildMessageEl(msg, scope) {
     const profile = contactProfile(msg.from) ||
       currentCommunity?.participants?.find(person => person.id === msg.from);
     styleName(author, profile);
+    appendVerificationBadge(author, profile);
     div.appendChild(author);
   }
   if (msg.reply_to?.id) div.appendChild(replyQuoteEl(msg.reply_to, scope));
@@ -1210,7 +1231,29 @@ function buildMessageEl(msg, scope) {
     metaText += metaText ? " · Letto" : "Letto";
   }
   metadata.textContent = metaText;
+  if (msg.e2ee && !msg.deleted) {
+    const lock = document.createElement("i");
+    lock.className = "ph ph-lock-simple msg-e2ee-lock";
+    lock.title = "Crittografato end-to-end";
+    lock.setAttribute("aria-label", "Crittografato end-to-end");
+    metadata.prepend(lock);
+  }
   div.appendChild(metadata);
+  if (Array.isArray(msg.edits) && msg.edits.length && !msg.deleted) {
+    const details = document.createElement("details");
+    details.className = "msg-edits";
+    const summary = document.createElement("summary");
+    summary.textContent = `Cronologia modifiche (${msg.edits.length})`;
+    details.appendChild(summary);
+    msg.edits.slice().reverse().forEach(entry => {
+      const line = document.createElement("div");
+      line.className = "msg-edit-entry";
+      const when = entry.ts ? new Date(entry.ts * 1000).toLocaleString([], { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "";
+      line.textContent = `${when} — ${entry.text || ""}`;
+      details.appendChild(line);
+    });
+    div.appendChild(details);
+  }
   attachMessageActions(div, msg, scope);
   return div;
 }
@@ -1374,7 +1417,7 @@ function closeForwardPicker() {
   forwardSource = null;
 }
 
-function forwardMessageTo(target) {
+async function forwardMessageTo(target) {
   const src = forwardSource;
   if (!src) return;
   const text = String(src.text || "").trim()
@@ -1386,6 +1429,16 @@ function forwardMessageTo(target) {
     return;
   }
   const payload = { ...target, text, forwarded_from: me?.username || me?.id };
+  if (src.attachment && typeof src.attachment === "object") {
+    payload.attachment = { hash: src.attachment.hash, name: src.attachment.name };
+  }
+  if (src.voice && typeof src.voice === "object") {
+    payload.voice = src.voice;
+  }
+  if (target.t === "dm" && await e2eeActiveFor(String(target.to).toLowerCase())) {
+    const enc = await encryptForPeer(String(target.to).toLowerCase(), { text });
+    if (enc) { payload.enc = enc; payload.text = ""; }
+  }
   if (src.poll && typeof src.poll === "object") {
     payload.poll = {
       q: String(src.poll.q || "").slice(0, 200),
@@ -1423,10 +1476,15 @@ function startMessageEdit(div, msg, scope) {
   cancel.type = "button";
   cancel.className = "btn btn-outline btn-sm";
   cancel.textContent = "Annulla";
-  const submit = () => {
+  const submit = async () => {
     const text = input.value.trim();
     if (text && text !== msg.text) {
-      send({ t: "msg_edit", scope: scope.kind, ...scopeFields(scope), id: msg.id, text });
+      const edit = { t: "msg_edit", scope: scope.kind, ...scopeFields(scope), id: msg.id, text };
+      if (scope?.kind === "dm" && await e2eeActiveFor(scope.with)) {
+        const enc = await encryptForPeer(scope.with, { text });
+        if (enc) { edit.enc = enc; edit.text = ""; }
+      }
+      send(edit);
     }
     box.remove();
   };
@@ -1533,7 +1591,8 @@ function requestOlderMessages(scope) {
   }
 }
 
-function prependHistory(scope, msgs, hasMore, oldest) {
+async function prependHistory(scope, msgs, hasMore, oldest) {
+  msgs = await decryptMessageList(scope, msgs);
   const fresh = (msgs || []).filter(msg => msg?.id && !isExpiredMessage(msg));
   fresh.forEach(msg => upsertCachedMessage(scope.key, msg));
   trimCache(scope.key);
@@ -1659,11 +1718,13 @@ function draftKey(scope) {
 }
 
 function saveDraft() {
-  const key = draftKey(activeScope());
+  const scope = activeScope();
+  const key = draftKey(scope);
   if (!key) return;
   const value = messageInput.value;
   if (value) localStorage.setItem(key, value);
   else localStorage.removeItem(key);
+  syncDraftToServer(scope);
 }
 
 function restoreDraft() {
@@ -1674,8 +1735,10 @@ function restoreDraft() {
 }
 
 function clearDraft(scope) {
-  const key = draftKey(scope || activeScope());
+  const resolved = scope || activeScope();
+  const key = draftKey(resolved);
   if (key) localStorage.removeItem(key);
+  if (resolved?.key) send({ t: "draft_save", scope_key: resolved.key, text: "" });
 }
 
 function updateConvStatus() {
@@ -1711,10 +1774,15 @@ function toggleMsgSearch(open) {
 }
 
 function runMsgSearch() {
-  const scope = activeScope();
   const query = el("msgSearchInput").value.trim();
   el("msgSearchResults").replaceChildren();
-  if (!scope || query.length < 2) return;
+  if (query.length < 2) return;
+  if (msgSearchGlobalMode) {
+    send({ t: "global_search", q: query });
+    return;
+  }
+  const scope = activeScope();
+  if (!scope) return;
   send({ t: "msg_search", q: query, scope: scope.kind, ...scopeFields(scope) });
 }
 
@@ -1740,7 +1808,7 @@ function renderSearchResults(m) {
     const snippet = document.createElement("span");
     snippet.className = "msg-search-snippet";
     const q = (m.q || "").toLowerCase();
-    const text = item.text || "";
+    const text = item.text || (item.enc ? "[Messaggio cifrato]" : "");
     const idx = text.toLowerCase().indexOf(q);
     if (idx >= 0) {
       snippet.append(
@@ -2543,6 +2611,8 @@ function selectContact(username) {
   el("pinnedBar").classList.add("hidden");
   renderCommunityList(communityListData);
   selectedContact = username;
+  convTtl = 0;
+  refreshConvTtlButton();
   clearUnread(`dm:${String(username).toLowerCase()}`);
   openContactProfileButton.disabled = false;
   renderSelectedContact();
@@ -2569,6 +2639,7 @@ function renderSelectedContact() {
   convName.textContent = name;
   scrambleText(convName);
   styleName(convName, profile);
+  appendVerificationBadge(convName, profile);
   convAvatar.replaceChildren();
   convAvatar.textContent = avatarInitial(name);
   const avatar = profile && mediaElement(profile.avatar, "conv-avatar-media");
@@ -2616,6 +2687,7 @@ function renderContactProfile() {
 
   contactProfileName.textContent = profile.name || profile.username || profile.id;
   styleName(contactProfileName, profile);
+  appendVerificationBadge(contactProfileName, profile);
   const username = profile.username || profile.id;
   contactProfileUsername.textContent = `@${username}${profile.pronouns ? ` | ${profile.pronouns}` : ""}`;
   const online = profile.online === true;
@@ -2642,6 +2714,35 @@ function renderContactProfile() {
   renderContactProfileBadges(profile.badges);
   renderContactProfileRoles(profile.roles);
   contactProfileMessageInput.placeholder = `Messaggia @${username}`;
+
+  const blockBtn = el("blockContactBtn");
+  if (blockBtn) {
+    blockBtn.classList.toggle("hidden", profile.id === me?.id);
+    blockBtn.dataset.user = username;
+  }
+  renderContactEphemeralStatus(username);
+
+  const e2eePeer = username.toLowerCase();
+  const e2eeRow = el("contactProfileE2ee");
+  if (e2eeRow) {
+    e2eeRow.classList.add("hidden");
+    e2eeRow.replaceChildren();
+    if (profile.id !== me?.id) {
+      e2eeActiveFor(e2eePeer).then(active => {
+        if (!active || profileBeingViewed !== profile) return;
+        e2eeRow.classList.remove("hidden");
+        const lock = document.createElement("i");
+        lock.className = "ph ph-lock-simple";
+        lock.setAttribute("aria-hidden", "true");
+        const label = document.createElement("span");
+        label.textContent = "Cifratura end-to-end attiva";
+        const number = document.createElement("code");
+        number.className = "e2ee-safety-number";
+        e2eeRow.append(lock, label, number);
+        safetyNumber(e2eePeer).then(num => { number.textContent = num || ""; });
+      });
+    }
+  }
 }
 
 function renderContactProfileBadges(badges) {
@@ -3063,6 +3164,9 @@ function populateSettingsSnapshot(snapshot) {
   el("twoFactorBtn").textContent = snapshot.two_factor_enabled ? "Disattiva 2FA" : "Configura 2FA";
   renderSessions(snapshot.sessions || []);
   renderBlocked(snapshot.blocked || []);
+  renderBadgeTiers(account.verification || me?.verification || null);
+  renderFriendRequests(snapshot.relationships || []);
+  renderMyStatuses();
   renderProfilePreview();
 }
 
@@ -4349,9 +4453,15 @@ function toggleBookmarkPanel(open) {
   }
 }
 
-function renderBookmarkList(m) {
+async function renderBookmarkList(m) {
   bookmarkList.replaceChildren();
   const items = m.items || [];
+  const scope = scopeFromKey(
+    m.scope === "community" ? `c:${m.community}:${m.channel}` : `dm:${String(m.with || "").toLowerCase()}`
+  ) || activeScope();
+  if (scope?.kind === "dm") {
+    await Promise.all(items.map(item => decryptMessage(item, scope)));
+  }
   if (!items.length) {
     const empty = document.createElement("div");
     empty.className = "msg-search-empty";
@@ -4359,9 +4469,6 @@ function renderBookmarkList(m) {
     bookmarkList.appendChild(empty);
     return;
   }
-  const scope = scopeFromKey(
-    m.scope === "community" ? `c:${m.community}:${m.channel}` : `dm:${String(m.with || "").toLowerCase()}`
-  ) || activeScope();
   items.forEach(item => {
     const button = document.createElement("button");
     button.type = "button";
@@ -4580,7 +4687,540 @@ function finishVoiceRecording() {
 
 let pendingVoiceSend = null;
 
-function sendChatMessage() {
+// ---------- Crittografia end-to-end (DM di testo) ----------
+// ECDH P-256: ogni utente ha una coppia di chiavi; la pubblica e' in profilo.
+// La chiave simmetrica di conversazione deriva dallo shared secret ECDH.
+// Il server vede solo ciphertext (`enc`); meta-dati (istante, hashed media,
+// reazioni, pin) restano in chiaro. Sondaggi/allegati/vocali NON sono cifrati.
+
+const E2EE_PRIV_LS = "ciaochat.e2ee.priv";
+const E2EE_PUB_LS = "ciaochat.e2ee.pub";
+let e2eeIdentity = null;                    // {privateKey, publicKey, pubRaw}
+const e2eePeerKeys = new Map();             // peer -> {key: CryptoKey, pubRaw: Uint8Array}
+const e2eePending = [];                     // peer le cui chiavi sono in derivazione
+
+function b64urlEncode(buffer) {
+  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+}
+
+function b64urlDecode(text) {
+  const padded = String(text).replaceAll("-", "+").replaceAll("_", "/");
+  const binary = atob(padded + "=".repeat((4 - padded.length % 4) % 4));
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+async function ensureE2EEIdentity() {
+  if (e2eeIdentity) return e2eeIdentity;
+  try {
+    const storedPriv = localStorage.getItem(E2EE_PRIV_LS);
+    const storedPub = localStorage.getItem(E2EE_PUB_LS);
+    if (storedPriv && storedPub) {
+      const privateKey = await crypto.subtle.importKey(
+        "jwk", JSON.parse(storedPriv), { name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]);
+      const publicKey = await crypto.subtle.importKey(
+        "jwk", JSON.parse(storedPub.jwk), { name: "ECDH", namedCurve: "P-256" }, false, []);
+      e2eeIdentity = { privateKey, publicKey, pubRaw: storedPub.raw };
+      return e2eeIdentity;
+    }
+    const pair = await crypto.subtle.generateKey(
+      { name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+    const privJwk = await crypto.subtle.exportKey("jwk", pair.privateKey);
+    const pubJwk = await crypto.subtle.exportKey("jwk", pair.publicKey);
+    const raw = await crypto.subtle.exportKey("raw", pair.publicKey);
+    const pubRaw = b64urlEncode(raw);
+    localStorage.setItem(E2EE_PRIV_LS, JSON.stringify(privJwk));
+    localStorage.setItem(E2EE_PUB_LS, JSON.stringify({ jwk: pubJwk, raw: pubRaw }));
+    e2eeIdentity = { privateKey: pair.privateKey, publicKey: pair.publicKey, pubRaw: `e2.${pubRaw}` };
+    return e2eeIdentity;
+  } catch {
+    e2eeIdentity = null;
+    return null;
+  }
+}
+
+function publishE2EEKey() {
+  const identity = e2eeIdentity;
+  if (identity?.pubRaw) send({ t: "e2ee_pub", pub: identity.pubRaw });
+}
+
+function peerE2EEPub(peer) {
+  const p = String(peer || "").toLowerCase();
+  if (p === String(me?.id || "").toLowerCase()) {
+    const pub = me?.e2ee_pub;
+    return typeof pub === "string" && pub.startsWith("e2.") ? pub : null;
+  }
+  for (const profile of [contactProfile(peer), profileBeingViewed]) {
+    if (!profile) continue;
+    const ids = [profile.id, profile.username].filter(Boolean).map(x => String(x).toLowerCase());
+    if (!ids.includes(p)) continue;
+    const pub = profile.e2ee_pub;
+    if (typeof pub === "string" && pub.startsWith("e2.")) return pub;
+  }
+  return null;
+}
+
+function e2eePeerKey(peer) {
+  return e2eePeerKeys.get(String(peer || "").toLowerCase()) || null;
+}
+
+async function ensurePeerKey(peer) {
+  const key = String(peer || "").toLowerCase();
+  if (e2eePeerKeys.has(key)) return e2eePeerKeys.get(key);
+  if (e2eePending.includes(key)) return null;
+  const identity = await ensureE2EEIdentity();
+  const pub = peerE2EEPub(peer);
+  if (!identity || !pub) return null;
+  e2eePending.push(key);
+  try {
+    const peerRaw = b64urlDecode(pub.slice(3));
+    const peerPub = await crypto.subtle.importKey(
+      "raw", peerRaw, { name: "ECDH", namedCurve: "P-256" }, false, []);
+    const bits = await crypto.subtle.deriveBits(
+      { name: "ECDH", public: peerPub }, identity.privateKey, 256);
+    const aes = await crypto.subtle.importKey("raw", bits, "AES-GCM", false, ["encrypt", "decrypt"]);
+    const entry = { key: aes, pubRaw: peerRaw };
+    e2eePeerKeys.set(key, entry);
+    return entry;
+  } catch {
+    return null;
+  } finally {
+    e2eePending.splice(e2eePending.indexOf(key), 1);
+  }
+}
+
+async function encryptForPeer(peer, payload) {
+  const entry = await ensurePeerKey(peer);
+  if (!entry) return null;
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const data = new TextEncoder().encode(JSON.stringify(payload));
+  const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, entry.key, data);
+  return `e1.${b64urlEncode(iv)}.${b64urlEncode(ct)}`;
+}
+
+async function decryptFromPeer(peer, enc) {
+  const entry = await ensurePeerKey(peer);
+  if (!entry || typeof enc !== "string") return null;
+  const parts = enc.split(".");
+  if (parts.length !== 3 || parts[0] !== "e1") return null;
+  try {
+    const plain = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: b64urlDecode(parts[1]) }, entry.key, b64urlDecode(parts[2]));
+    return JSON.parse(new TextDecoder().decode(plain));
+  } catch {
+    return null;
+  }
+}
+
+function dmPeerOf(msg, scope) {
+  if (scope?.kind === "dm") return scope.with;
+  const from = String(msg?.from || "").toLowerCase();
+  return from === String(me?.id || "").toLowerCase() ? String(msg?.to || "").toLowerCase() : from;
+}
+
+async function decryptMessage(msg, scope) {
+  if (!msg?.enc || msg.text) return msg;
+  const peer = dmPeerOf(msg, scope);
+  const payload = await decryptFromPeer(peer, msg.enc);
+  if (payload && typeof payload === "object") {
+    msg.text = String(payload.text || "");
+    if (payload.reply && typeof payload.reply === "object") msg.reply_to = payload.reply;
+  } else {
+    msg.text = "[Messaggio cifrato non leggibile]";
+  }
+  msg.e2ee = true;
+  delete msg.enc;
+  return msg;
+}
+
+async function decryptMessageList(scope, msgs) {
+  if (scope?.kind !== "dm") return msgs || [];
+  return Promise.all((msgs || []).map(msg => decryptMessage(msg, scope)));
+}
+
+async function e2eeActiveFor(peer) {
+  if (!peer || peer === String(me?.id || "").toLowerCase()) return false;
+  await ensureE2EEIdentity();
+  return !!(e2eeIdentity && peerE2EEPub(peer) && await ensurePeerKey(peer));
+}
+
+function safetyNumber(peer) {
+  const mine = e2eeIdentity?.pubRaw;
+  const theirs = peerE2EEPub(peer);
+  if (!mine || !theirs) return null;
+  const a = b64urlDecode(mine.slice(3));
+  const b = b64urlDecode(theirs.slice(3));
+  const concat = new Uint8Array(a.length + b.length);
+  concat.set(a); concat.set(b, a.length);
+  return crypto.subtle.digest("SHA-256", concat).then(hash =>
+    [...new Uint8Array(hash)].map(x => x.toString(16).padStart(2, "0")).join("")
+      .replace(/(.{5})/g, "$1 ").trim().slice(0, 35));
+}
+
+// ---------- Stati temporanei, badge verificati, richieste, blocchi ----------
+
+const statusCache = new Map();          // user_id -> [stati attivi]
+let statusRefreshTimer = null;
+
+const VERIFICATION_TIERS = [
+  { id: "blue",    label: "Blu",       price: "10€/mese", perks: "Badge blu · Bio fino a 240 caratteri" },
+  { id: "black",   label: "Nero",      price: "25€/mese", perks: "Badge nera · Bio 320 · Animazione nome arcobaleno" },
+  { id: "rainbow", label: "Arcobaleno",price: "50€/mese", perks: "Badge animata · Bio 500 · Animazione arcobaleno" },
+];
+
+function verificationBadgeEl(profile) {
+  const tier = profile?.verification;
+  if (!tier || !VERIFICATION_TIERS.some(t => t.id === tier)) return null;
+  const icon = document.createElement("i");
+  icon.className = `ph ph-seal-check verified-badge verified-${tier}`;
+  icon.title = `Account verificato (${tier})`;
+  return icon;
+}
+
+function appendVerificationBadge(target, profile) {
+  const badge = verificationBadgeEl(profile);
+  if (badge && target) target.appendChild(badge);
+}
+
+function hasActiveStatus(username) {
+  const id = String(username || "").toLowerCase();
+  const list = statusCache.get(id) || statusCache.get(username);
+  return Array.isArray(list) && list.length > 0;
+}
+
+function contactStatuses(username) {
+  const id = String(username || "").toLowerCase();
+  return statusCache.get(id) || statusCache.get(username) || [];
+}
+
+function requestStatusList() {
+  send({ t: "status_list" });
+}
+
+function queueStatusRefresh() {
+  clearTimeout(statusRefreshTimer);
+  statusRefreshTimer = setTimeout(requestStatusList, 400);
+}
+
+function renderMyStatuses() {
+  const container = el("myStatusesList");
+  if (!container) return;
+  const mine = statusCache.get(String(me?.id || "").toLowerCase()) || [];
+  container.replaceChildren();
+  if (!mine.length) {
+    container.innerHTML = '<div class="settings-list-item muted">Nessuno stato attivo.</div>';
+    return;
+  }
+  mine.forEach(item => {
+    const row = document.createElement("div");
+    row.className = "settings-list-item";
+    const left = document.createElement("span");
+    left.innerHTML = `<strong></strong><small class="muted"></small>`;
+    left.querySelector("strong").textContent = item.text || "";
+    const leftTs = item.expires_at ? new Date(item.expires_at * 1000) : null;
+    left.querySelector("small").textContent = leftTs
+      ? `Scade il ${leftTs.toLocaleString([], { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}`
+      : "";
+    const button = document.createElement("button");
+    button.className = "btn btn-outline";
+    button.textContent = "Elimina";
+    button.onclick = () => send({ t: "status_delete", id: item.id });
+    row.append(left, button);
+    container.appendChild(row);
+  });
+}
+
+function renderBadgeTiers(current) {
+  const container = el("badgeTierList");
+  if (!container) return;
+  container.replaceChildren();
+  VERIFICATION_TIERS.forEach(tier => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `badge-tier${current === tier.id ? " active" : ""}`;
+    const icon = document.createElement("i");
+    icon.className = `ph ph-seal-check verified-badge verified-${tier.id}`;
+    const title = document.createElement("strong");
+    title.textContent = `${tier.label} · ${tier.price}`;
+    const perks = document.createElement("small");
+    perks.textContent = tier.perks;
+    button.append(icon, title, perks);
+    button.onclick = () => send({ t: "badge_update", tier: tier.id });
+    container.appendChild(button);
+  });
+  if (current) {
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "btn btn-outline small-btn";
+    cancel.textContent = "Annulla abbonamento";
+    cancel.onclick = () => send({ t: "badge_update", action: "cancel" });
+    container.appendChild(cancel);
+  }
+}
+
+function renderFriendRequests(relationships) {
+  const container = el("friendRequestsList");
+  if (!container) return;
+  container.replaceChildren();
+  const list = (relationships || []).filter(r =>
+    ["pending_incoming", "pending_outgoing"].includes(r.status));
+  if (!list.length) {
+    container.innerHTML = '<div class="settings-list-item muted">Nessuna richiesta.</div>';
+    return;
+  }
+  list.forEach(rel => {
+    const profile = rel.profile || {};
+    const name = profile.name || profile.username || rel.target_user_id;
+    const row = document.createElement("div");
+    row.className = "settings-list-item";
+    const left = document.createElement("span");
+    left.innerHTML = `<strong></strong><small class="muted"></small>`;
+    left.querySelector("strong").textContent = name;
+    left.querySelector("small").textContent = rel.status === "pending_incoming"
+      ? "Vuole aggiungerti ai contatti" : "Richiesta inviata";
+    row.appendChild(left);
+    if (rel.status === "pending_incoming") {
+      const accept = document.createElement("button");
+      accept.className = "btn btn-primary small-btn";
+      accept.textContent = "Accetta";
+      accept.onclick = () => send({ t: "relationship_update", user: rel.target_user_id, action: "accept" });
+      const decline = document.createElement("button");
+      decline.className = "btn btn-outline small-btn";
+      decline.textContent = "Rifiuta";
+      decline.onclick = () => send({ t: "relationship_update", user: rel.target_user_id, action: "decline" });
+      row.append(accept, decline);
+    }
+    container.appendChild(row);
+  });
+}
+
+function renderContactEphemeralStatus(username) {
+  const section = el("contactProfileEphemeral");
+  const body = el("contactProfileEphemeralBody");
+  if (!section || !body) return;
+  const list = contactStatuses(username);
+  section.classList.toggle("hidden", !list.length);
+  body.replaceChildren();
+  list.forEach(item => {
+    const row = document.createElement("div");
+    row.className = "ephemeral-status-item";
+    const text = document.createElement("span");
+    text.textContent = item.text || "";
+    const time = document.createElement("small");
+    const left = item.expires_at ? item.expires_at - Math.floor(Date.now() / 1000) : 0;
+    const hours = Math.max(1, Math.ceil(left / 3600));
+    time.textContent = `tra ${hours}h`;
+    row.append(text, time);
+    body.appendChild(row);
+  });
+}
+
+// ---------- Messaggi programmati: lista e cancellazione ----------
+
+const scheduledList = el("scheduledList");
+const scheduledPanel = el("scheduledPanel");
+let scheduledItems = [];
+
+function fmtScheduleTime(ts) {
+  return ts ? new Date(ts * 1000).toLocaleString([], {
+    day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "";
+}
+
+function scheduledTargetLabel(item) {
+  if (item.kind === "community") {
+    const comm = (communityListData || []).find(c => c.id === item.community);
+    return `#${item.channel} · ${comm?.name || item.community}`;
+  }
+  return contactProfile(item.with)?.name || `@${item.with || "?"}`;
+}
+
+function renderScheduledList() {
+  if (!scheduledList) return;
+  scheduledList.replaceChildren();
+  if (!scheduledItems.length) {
+    scheduledList.innerHTML = '<div class="msg-search-empty">Nessun messaggio programmato.</div>';
+    return;
+  }
+  scheduledItems.forEach(item => {
+    const row = document.createElement("div");
+    row.className = "msg-search-result bookmark-result";
+    const main = document.createElement("span");
+    main.className = "msg-search-snippet";
+    main.textContent = item.text
+      || (item.has_poll ? "[Sondaggio]" : item.has_voice ? "[Messaggio vocale]" : "[Allegato]");
+    const meta = document.createElement("span");
+    meta.className = "msg-search-time";
+    meta.textContent = `${scheduledTargetLabel(item)} · ${fmtScheduleTime(item.send_at)}`;
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "btn btn-outline btn-sm";
+    cancel.textContent = "Annulla";
+    cancel.addEventListener("click", () =>
+      send({ t: "scheduled_cancel", id: item.id }));
+    row.append(main, meta, cancel);
+    scheduledList.appendChild(row);
+  });
+}
+
+function toggleScheduledPanel(force) {
+  const show = force ?? scheduledPanel.classList.contains("hidden");
+  scheduledPanel.classList.toggle("hidden", !show);
+  if (show) {
+    bookmarkPanel?.classList.add("hidden");
+    send({ t: "scheduled_list" });
+  }
+}
+
+// ---------- Scadenza TTL per conversazione (DM) ----------
+
+let convTtl = 0;   // secondi; 0 = disattivata
+
+function convTtlLabel(ttl) {
+  if (!ttl) return "disattivata";
+  const h = Math.floor(ttl / 3600), d = Math.floor(ttl / 86400);
+  if (d >= 1) return `${d}g`;
+  if (h >= 1) return `${h}h`;
+  return `${Math.max(1, Math.round(ttl / 60))}m`;
+}
+
+function refreshConvTtlButton() {
+  const btn = el("convTtlButton");
+  if (!btn) return;
+  btn.classList.toggle("active", !!convTtl);
+  btn.title = convTtl ? `Scadenza messaggi: ${convTtlLabel(convTtl)}` : "Scadenza conversazione";
+}
+
+function openConvTtlPicker(anchor) {
+  document.getElementById("convTtlPanel")?.remove();
+  const panel = document.createElement("div");
+  panel.className = "ttl-panel";
+  panel.id = "convTtlPanel";
+  const title = document.createElement("div");
+  title.className = "ttl-panel-title";
+  title.textContent = "Scadenza per tutti i messaggi";
+  panel.appendChild(title);
+  const presets = [
+    { label: "1 ora", ttl: 3600 }, { label: "24 ore", ttl: 86400 },
+    { label: "7 giorni", ttl: 604800 }, { label: "Nessuna", ttl: 0 },
+  ];
+  presets.forEach(preset => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "ttl-option" + (convTtl === preset.ttl ? " active" : "");
+    button.textContent = preset.label;
+    button.addEventListener("click", () => {
+      panel.remove();
+      send({ t: "conv_ttl", with: selectedContact, ttl: preset.ttl });
+    });
+    panel.appendChild(button);
+  });
+  document.body.appendChild(panel);
+  const rect = anchor.getBoundingClientRect();
+  panel.style.left = `${Math.min(rect.left, window.innerWidth - panel.offsetWidth - 12)}px`;
+  panel.style.top = `${Math.max(8, rect.bottom + 6)}px`;
+  const close = event => {
+    if (!panel.contains(event.target)) {
+      panel.remove();
+      document.removeEventListener("click", close, true);
+    }
+  };
+  setTimeout(() => document.addEventListener("click", close, true), 0);
+}
+
+// ---------- Ricerca globale ----------
+
+let msgSearchGlobalMode = false;
+
+function toggleMsgSearchGlobal() {
+  msgSearchGlobalMode = !msgSearchGlobalMode;
+  const btn = el("msgSearchGlobal");
+  btn?.classList.toggle("active", msgSearchGlobalMode);
+  el("msgSearchInput").placeholder = msgSearchGlobalMode
+    ? "Cerca in tutte le conversazioni..." : "Cerca nei messaggi...";
+  el("msgSearchInput").dispatchEvent(new Event("input"));
+}
+
+function globalResultScope(item) {
+  if (item.scope === "community") {
+    return rememberScope({
+      kind: "community", community: item.community, channel: item.channel,
+      key: `c:${item.community}:${item.channel}`,
+    });
+  }
+  const peer = String(item.with || "").toLowerCase();
+  return rememberScope({ kind: "dm", with: peer, key: `dm:${peer}` });
+}
+
+function globalResultLabel(item) {
+  if (item.scope === "community") {
+    const comm = (communityListData || []).find(c => c.id === item.community);
+    return `#${item.channel} · ${comm?.name || item.community}`;
+  }
+  return contactProfile(item.with)?.name || `@${item.with || "?"}`;
+}
+
+function renderGlobalSearchResults(m) {
+  const results = el("msgSearchResults");
+  results.replaceChildren();
+  const items = m.results || [];
+  if (!items.length) {
+    results.innerHTML = '<div class="msg-search-empty">Nessun risultato.</div>';
+    return;
+  }
+  items.forEach(item => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "msg-search-result";
+    const author = document.createElement("span");
+    author.className = "msg-search-author";
+    author.textContent = globalResultLabel(item);
+    const snippet = document.createElement("span");
+    snippet.className = "msg-search-snippet";
+    snippet.textContent = item.text || "";
+    const time = document.createElement("span");
+    time.className = "msg-search-time";
+    const ts = msgTs({ ts: item.ts });
+    time.textContent = ts ? new Date(ts).toLocaleString([], { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "";
+    button.append(author, snippet, time);
+    button.addEventListener("click", () => {
+      toggleMsgSearch(false);
+      const scope = globalResultScope(item);
+      if (!scope) return;
+      if (scope.kind === "dm") selectContact(scope.with);
+      else {
+        selectCommunity(scope.community);
+        setTimeout(() => selectCommunityChannel(scope.channel), 800);
+      }
+      setTimeout(() => jumpToMessage(scope, item.id), 1600);
+    });
+    results.appendChild(button);
+  });
+}
+
+// ---------- Bozze sincronizzate ----------
+
+let draftSyncTimer = null;
+
+function syncDraftToServer(scope) {
+  if (!scope) return;
+  clearTimeout(draftSyncTimer);
+  draftSyncTimer = setTimeout(() => {
+    send({ t: "draft_save", scope_key: scope.key, text: messageInput.value });
+  }, 800);
+}
+
+function applyServerDrafts(drafts) {
+  Object.entries(drafts || {}).forEach(([key, text]) => {
+    if (typeof text === "string" && text)
+      localStorage.setItem(`ciaochat.draft.${key}`, text);
+  });
+}
+
+async function sendChatMessage() {
   const text = messageInput.value.trim();
   if (attachmentUploadPending) {
     setComposerFeedback("Attendi il completamento dell'upload.", "error");
@@ -4605,13 +5245,27 @@ function sendChatMessage() {
         : null;
   const reply = replyPayload();
   const scheduled = pendingScheduleAt > Math.floor(Date.now() / 1000) ? pendingScheduleAt : 0;
+  let enc = null;
+  let replyField = reply;
+  if (!target?.community && text) {
+    const peer = String(target?.to || selectedContact || "").toLowerCase();
+    if (await e2eeActiveFor(peer)) {
+      enc = await encryptForPeer(peer, { text, reply: reply || null });
+      if (enc) replyField = null;   // la risposta viaggia dentro il payload cifrato
+      else {
+        setComposerFeedback("Crittografia non disponibile per questo contatto.", "error");
+        return;
+      }
+    }
+  }
   const payload = target?.community
     ? { t: "community_channel_send", ...target, text,
         ...(attachment ? { attachment } : {}), ...(poll ? { poll } : {}),
-        ...(reply ? { reply_to: reply } : {}), ...(scheduled ? { send_at: scheduled } : {}) }
-    : { t: "dm", to: target?.to || selectedContact, text,
+        ...(replyField ? { reply_to: replyField } : {}), ...(scheduled ? { send_at: scheduled } : {}) }
+    : { t: "dm", to: target?.to || selectedContact, text: enc ? "" : text,
+        ...(enc ? { enc } : {}),
         ...(attachment ? { attachment } : {}), ...(poll ? { poll } : {}),
-        ...(reply ? { reply_to: reply } : {}), ...(scheduled ? { send_at: scheduled } : {}) };
+        ...(replyField ? { reply_to: replyField } : {}), ...(scheduled ? { send_at: scheduled } : {}) };
   if (!payload.to && !payload.community) {
     setComposerFeedback("Seleziona una conversazione o un canale.", "error");
     return;
@@ -4834,6 +5488,29 @@ voiceRecordButton.addEventListener("click", () => {
 voiceRecorderCancel.addEventListener("click", () => cancelVoiceRecording());
 voiceRecorderStop.addEventListener("click", finishVoiceRecording);
 
+el("statusPostBtn")?.addEventListener("click", () => {
+  const text = el("statusText").value.trim();
+  if (!text) return;
+  send({ t: "status_post", text });
+  el("statusText").value = "";
+});
+el("statusText")?.addEventListener("keydown", event => {
+  if (event.key === "Enter") el("statusPostBtn")?.click();
+});
+el("blockContactBtn")?.addEventListener("click", () => {
+  const user = el("blockContactBtn").dataset.user;
+  if (!user) return;
+  if (!confirm(`Bloccare @${user}? Non potrà più scriverti e tu non potrai più scrivergli.`)) return;
+  send({ t: "block_update", user, action: "block" });
+  contactProfileModal.classList.add("hidden");
+});
+el("scheduledButton")?.addEventListener("click", () => toggleScheduledPanel());
+el("scheduledClose")?.addEventListener("click", () => toggleScheduledPanel(false));
+el("convTtlButton")?.addEventListener("click", event => {
+  if (activeScope()?.kind !== "dm" || !selectedContact) return;
+  openConvTtlPicker(event.currentTarget);
+});
+el("msgSearchGlobal")?.addEventListener("click", toggleMsgSearchGlobal);
 el("searchButton").addEventListener("click", () => toggleMsgSearch());
 el("msgSearchClose").addEventListener("click", () => toggleMsgSearch(false));
 let msgSearchDebounce = null;
@@ -4870,6 +5547,12 @@ function onMessage(event) {
       showMessenger();
       convStatus.textContent = "Connesso";
       send({ t: "community_list" });
+      send({ t: "status_list" });
+      send({ t: "draft_list" });
+      ensureE2EEIdentity().then(() => {
+        publishE2EEKey();
+        if (selectedContact) e2eeActiveFor(selectedContact);
+      });
       break;
 
     case "settings_data":
@@ -5172,6 +5855,62 @@ function onMessage(event) {
       el("quickContactFeedback").className = "success";
       break;
 
+    case "e2ee_pub_ok":
+      // Chiave pubblica di cifratura pubblicata.
+      break;
+
+    case "status_list": {
+      statusCache.clear();
+      const meId = String(me?.id || "").toLowerCase();
+      (m.mine || []).length && statusCache.set(meId, m.mine);
+      Object.entries(m.contacts || {}).forEach(([uid, list]) => {
+        statusCache.set(String(uid).toLowerCase(), list);
+      });
+      renderContacts();
+      renderMyStatuses();
+      if (selectedContact) renderContactEphemeralStatus(selectedContact);
+      break;
+    }
+
+    case "status_update":
+      queueStatusRefresh();
+      break;
+
+    case "status_posted":
+    case "status_deleted":
+      requestStatusList();
+      break;
+
+    case "admin_notice":
+      appendSystemMessage(`Avviso: ${m.text || ""}`);
+      break;
+
+    case "scheduled_list":
+      scheduledItems = m.items || [];
+      renderScheduledList();
+      break;
+
+    case "scheduled_cancelled":
+      scheduledItems = scheduledItems.filter(item => item.id !== m.id);
+      renderScheduledList();
+      break;
+
+    case "draft_list":
+      applyServerDrafts(m.drafts);
+      if (activeScope()) restoreDraft();
+      break;
+
+    case "conv_ttl":
+      if (m.with === selectedContact) {
+        convTtl = m.ttl || 0;
+        refreshConvTtlButton();
+      }
+      break;
+
+    case "global_search":
+      renderGlobalSearchResults(m);
+      break;
+
     case "history": {
       const scope = activeScope()?.kind === "dm"
         ? activeScope()
@@ -5182,14 +5921,20 @@ function onMessage(event) {
       } else if (!m.before) {
         renderHistory(m.msgs || [], m.with, m.read_ts || 0,
                       { hasMore: m.has_more, oldest: m.oldest });
+        if (typeof m.conv_ttl !== "undefined" && scope.kind === "dm") {
+          convTtl = m.conv_ttl || 0;
+          refreshConvTtlButton();
+        }
       }
       break;
     }
 
     case "dm": {
+      (async () => {
       const from = m.from || "";
       const isSelf = String(from).toLowerCase() === String(me?.id || "").toLowerCase();
       const peer = isSelf ? String(m.to || "").toLowerCase() : String(from).toLowerCase();
+      await decryptMessage(m, { kind: "dm", with: peer });
       onIncomingMessage(
         `dm:${peer}`,
         contactProfile(from)?.name || from || "Sconosciuto",
@@ -5215,19 +5960,30 @@ function onMessage(event) {
           updateTypingIndicator();
         }
       }
+      })();
       break;
     }
 
     case "msg_updated": {
       const scopeKey = m.scope === "community" ? `c:${m.community}:${m.channel}` : `dm:${String(m.with || "").toLowerCase()}`;
-      patchCachedMessage(scopeKey, m.id, { text: m.text, edited: true });
-      refreshMessageElement(scopeKey, m.id);
+      if (m.enc && m.scope !== "community") {
+        decryptFromPeer(String(m.with || "").toLowerCase(), m.enc).then(payload => {
+          patchCachedMessage(scopeKey, m.id, {
+            text: payload && typeof payload === "object" ? String(payload.text || "") : "[Messaggio cifrato non leggibile]",
+            edited: true, e2ee: true, enc: null, edits: m.edits || null,
+          });
+          refreshMessageElement(scopeKey, m.id);
+        });
+      } else {
+        patchCachedMessage(scopeKey, m.id, { text: m.text, edited: true, edits: m.edits || null });
+        refreshMessageElement(scopeKey, m.id);
+      }
       break;
     }
 
     case "msg_deleted": {
       const scopeKey = m.scope === "community" ? `c:${m.community}:${m.channel}` : `dm:${String(m.with || "").toLowerCase()}`;
-      patchCachedMessage(scopeKey, m.id, { deleted: true, text: "", attachment: null, voice: null, poll: null, reactions: {} });
+      patchCachedMessage(scopeKey, m.id, { deleted: true, text: "", attachment: null, voice: null, poll: null, reactions: {}, enc: null });
       const node = messages.querySelector(`.msg[data-msg-id="${CSS.escape(String(m.id))}"]`);
       if (node) node.replaceWith(buildMessageEl(
         (convoCaches.get(scopeKey) || []).find(item => item.id === m.id) || { id: m.id, deleted: true },
@@ -5268,6 +6024,7 @@ function onMessage(event) {
 
     case "msg_scheduled":
       setComposerFeedback("Messaggio programmato correttamente.", "success");
+      if (!scheduledPanel.classList.contains("hidden")) send({ t: "scheduled_list" });
       break;
 
     case "msg_scheduled_sent": {
@@ -5346,7 +6103,11 @@ function onMessage(event) {
     case "msg_result": {
       const scopeKey = m.scope === "community" ? `c:${m.community}:${m.channel}` : `dm:${String(m.with || "").toLowerCase()}`;
       const scope = scopeFromKey(scopeKey);
+      (async () => {
       if (m.message?.id) {
+        if (m.message.enc && m.scope !== "community") {
+          await decryptMessage(m.message, { kind: "dm", with: String(m.with || "").toLowerCase() });
+        }
         upsertCachedMessage(scopeKey, m.message);
         trimCache(scopeKey);
         const active = activeScope();
@@ -5355,6 +6116,7 @@ function onMessage(event) {
           jumpToMessage(scope, m.message.id);
         }
       }
+      })();
       break;
     }
 
@@ -5558,11 +6320,12 @@ function onMessage(event) {
   }
 }
 
-function renderHistory(msgs, withUser, readTs = 0, meta = {}) {
+async function renderHistory(msgs, withUser, readTs = 0, meta = {}) {
   const scope = activeScope()?.kind === "dm"
     ? activeScope()
     : { kind: "dm", with: String(withUser || "").toLowerCase(),
         key: `dm:${String(withUser || "").toLowerCase()}` };
+  msgs = await decryptMessageList(scope, msgs);
   rememberHistory(scope, meta.hasMore, meta.oldest);
   renderConvoList(scope, msgs || [], readTs);
 }

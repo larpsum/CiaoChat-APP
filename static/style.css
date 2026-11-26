@@ -2769,3 +2769,163 @@ body.theme-light #scheduleInput { color-scheme: light; }
   cursor: pointer;
 }
 .ttl-option:hover { background: var(--surface-hover); }
+
+/* ---------- E2EE ---------- */
+.msg .meta .msg-e2ee-lock {
+  font-size: 0.72rem;
+  vertical-align: -1px;
+  margin-right: 2px;
+  opacity: 0.75;
+}
+#contactProfileE2ee {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+}
+#contactProfileE2ee > span,
+#contactProfileE2ee > code {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.e2ee-safety-number {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  color: var(--text);
+  word-break: break-all;
+}
+
+/* ---------- Badge verificati, stati, richieste ---------- */
+.verified-badge {
+  font-size: 0.85em;
+  margin-left: 4px;
+  vertical-align: -1px;
+}
+.verified-blue { color: #1d9bf0; }
+.verified-black {
+  color: #e5e7eb;
+  text-shadow: 0 0 6px rgba(0,0,0,.8), 0 0 2px #000;
+}
+body.theme-light .verified-black { color: #111827; text-shadow: none; }
+.verified-rainbow {
+  background: linear-gradient(90deg,#f00,#ff0,#0f0,#0ff,#00f,#f0f,#f00);
+  background-size: 300% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: verified-rainbow 3s linear infinite;
+}
+@keyframes verified-rainbow {
+  to { background-position: 300% 0; }
+}
+
+.contact-item.has-status .contact-avatar::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  border: 2px solid #22c55e;
+  pointer-events: none;
+}
+.contact-avatar { position: relative; }
+
+.badge-tier-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+.badge-tier {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.badge-tier:hover { background: var(--surface-hover); }
+.badge-tier.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.badge-tier strong { display: block; font-size: 0.85rem; }
+.badge-tier small { color: var(--text-secondary); font-size: 0.75rem; }
+.badge-tier .verified-badge { font-size: 1.2rem; }
+
+.status-compose {
+  display: flex;
+  gap: 8px;
+  margin: 8px 0;
+}
+.status-compose input {
+  flex: 1;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.ephemeral-status-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 0;
+  font-size: 0.85rem;
+  border-bottom: 1px solid var(--border);
+}
+.ephemeral-status-item small { color: var(--text-secondary); white-space: nowrap; }
+
+/* ---------- Programmati, TTL conversazione, ricerca globale, modifiche, markup ---------- */
+.icon-btn.active { color: var(--accent); }
+.ttl-option.active { color: var(--accent); font-weight: 600; }
+
+.msg-edits {
+  margin-top: 4px;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+.msg-edits summary { cursor: pointer; opacity: 0.8; }
+.msg-edit-entry {
+  padding: 3px 0;
+  border-bottom: 1px dashed var(--border);
+  word-break: break-word;
+}
+
+.msg .message-body code.inline-code,
+.msg .message-body code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85em;
+  background: var(--surface-hover);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.msg .message-body pre {
+  background: var(--surface-hover);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  overflow-x: auto;
+  margin: 6px 0;
+}
+.msg .message-body pre code {
+  background: transparent;
+  padding: 0;
+  font-size: 0.8rem;
+  white-space: pre;
+}
+
+.spoiler {
+  background: #000;
+  color: #000;
+  border-radius: 3px;
+  padding: 0 2px;
+  cursor: pointer;
+  transition: color .15s;
+}
+body.theme-light .spoiler { background: #334155; }
+.spoiler.revealed { background: transparent; color: inherit; }

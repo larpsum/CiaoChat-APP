@@ -152,6 +152,8 @@
           <button class="icon-btn" id="profileSettingsHeaderBtn" type="button" title="Impostazioni" aria-label="Impostazioni"><i class="ph ph-gear" aria-hidden="true"></i></button>
           <button class="icon-btn" id="searchButton" type="button" title="Cerca" aria-label="Cerca"><i class="ph ph-magnifying-glass" aria-hidden="true"></i></button>
           <button class="icon-btn" id="bookmarkButton" type="button" title="Preferiti" aria-label="Preferiti della conversazione"><i class="ph ph-bookmark-simple" aria-hidden="true"></i></button>
+          <button class="icon-btn" id="scheduledButton" type="button" title="Messaggi programmati" aria-label="Messaggi programmati"><i class="ph ph-clock-countdown" aria-hidden="true"></i></button>
+          <button class="icon-btn" id="convTtlButton" type="button" title="Scadenza conversazione" aria-label="Scadenza conversazione"><i class="ph ph-timer" aria-hidden="true"></i></button>
           <button class="icon-btn" id="microphoneButton" type="button" title="Test microfono" aria-label="Test microfono"><i class="ph ph-microphone" aria-hidden="true"></i></button>
           <button class="icon-btn" id="voiceCallButton" type="button" title="Chiamata vocale" aria-label="Chiamata vocale"><i class="ph ph-phone" aria-hidden="true"></i></button>
           <button class="icon-btn" id="callButton" type="button" title="Videochiamata" aria-label="Videochiamata"><i class="ph ph-video-camera" aria-hidden="true"></i></button>
@@ -164,8 +166,14 @@
       </section>
       <div class="msg-search-panel hidden" id="msgSearchPanel">
         <input type="search" id="msgSearchInput" placeholder="Cerca nei messaggi..." autocomplete="off">
+        <button class="icon-btn" id="msgSearchGlobal" type="button" title="Cerca in tutte le conversazioni" aria-label="Cerca globale"><i class="ph ph-globe" aria-hidden="true"></i></button>
         <button class="icon-btn" id="msgSearchClose" type="button" aria-label="Chiudi ricerca"><i class="ph ph-x" aria-hidden="true"></i></button>
         <div class="msg-search-results" id="msgSearchResults"></div>
+      </div>
+      <div class="msg-search-panel hidden" id="scheduledPanel">
+        <span class="bookmark-panel-title"><i class="ph ph-clock-countdown" aria-hidden="true"></i> Programmati</span>
+        <button class="icon-btn" id="scheduledClose" type="button" aria-label="Chiudi programmati"><i class="ph ph-x" aria-hidden="true"></i></button>
+        <div class="msg-search-results" id="scheduledList"></div>
       </div>
       <div class="msg-search-panel hidden" id="bookmarkPanel">
         <span class="bookmark-panel-title"><i class="ph ph-bookmark-simple" aria-hidden="true"></i> Preferiti</span>
@@ -301,6 +309,14 @@
           <h3>RUOLI</h3>
           <div class="contact-profile-roles" id="contactProfileRoles"></div>
         </section>
+        <section class="contact-profile-section hidden" id="contactProfileE2ee">
+          <h3>SICUREZZA</h3>
+        </section>
+        <section class="contact-profile-section hidden" id="contactProfileEphemeral">
+          <h3>STATO</h3>
+          <div id="contactProfileEphemeralBody"></div>
+        </section>
+        <button class="btn btn-outline btn-sm hidden" id="blockContactBtn" type="button">Blocca utente</button>
         <p class="contact-profile-error" id="contactProfileError" role="status" aria-live="polite"></p>
       </section>
       <form class="contact-profile-message" id="contactProfileMessageForm">
@@ -357,6 +373,20 @@
             <div class="profile-file-row"><input id="bannerFile" type="file" accept=".jpg,.png,.webp,.mp4,.gif,image/jpeg,image/png,image/webp,video/mp4,image/gif"><button class="btn btn-outline" data-clear-media="banner" type="button">Rimuovi banner</button></div>
           </div>
           <div class="settings-card">
+            <h4>Badge verificato</h4>
+            <p class="muted">Verifica il tuo account con un badge a pagamento (simulato, nessun addebito reale).</p>
+            <div id="badgeTierList" class="badge-tier-list"></div>
+          </div>
+          <div class="settings-card">
+            <h4>Stato temporaneo</h4>
+            <p class="muted">Visibile solo ai tuoi contatti, per 24 ore.</p>
+            <div class="status-compose">
+              <input id="statusText" type="text" maxlength="200" placeholder="Cosa sta succedendo?" aria-label="Testo stato">
+              <button class="btn btn-primary small-btn" id="statusPostBtn" type="button">Pubblica</button>
+            </div>
+            <div id="myStatusesList" class="settings-list"></div>
+          </div>
+          <div class="settings-card">
             <h4>Cambia password</h4>
             <div class="settings-grid">
               <div class="setting-field"><label>Password attuale</label><input id="currentPassword" type="password"></div>
@@ -373,6 +403,7 @@
           <div class="setting-row"><div><strong>Messaggi diretti</strong><small>Chi può inviarti messaggi</small></div><select id="dmPolicy"><option value="everyone">Tutti</option><option value="friends_group">Amici e membri dei gruppi</option><option value="friends">Solo amici</option></select></div>
           <div class="setting-row"><div><strong>Richieste di amicizia</strong><small>Chi può inviarti richieste</small></div><select id="friendPolicy"><option value="everyone">Tutti</option><option value="mutuals">Amici in comune</option><option value="group_members">Membri di gruppi condivisi</option><option value="none">Nessuno</option></select></div>
           <label class="toggle-row"><span><strong>Filtro contenuti multimediali</strong><small>Filtra allegati espliciti o indesiderati</small></span><input id="mediaFilter" type="checkbox"><span class="toggle"></span></label>
+          <div class="settings-card"><h4>Richieste di contatto</h4><div id="friendRequestsList" class="settings-list"></div></div>
           <div class="settings-card"><h4>Utenti bloccati</h4><div id="blockedUsersList" class="settings-list"></div></div>
         </section>
 
