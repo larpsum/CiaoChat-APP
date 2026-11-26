@@ -56,6 +56,14 @@ let forwardSource = null;             // messaggio da inoltrare
 const peerReadTs = {};                 // DM: user -> ts fino a cui ha letto i miei messaggi
 let activeReadTs = 0;                 // read_ts dell'ultima cronologia renderizzata
 let lastTypingSentAt = 0;
+const historyState = new Map();        // scopeKey -> {hasMore, oldest}
+const historyLoading = new Set();      // scopeKey con una pagina piu' vecchia in caricamento
+const bookmarkedMsgs = new Set();      // "scopeKey:msgId" salvati come preferiti
+let pendingPoll = null;                // {q, options:[], multiple} in attesa di invio
+let pendingScheduleAt = 0;             // send_at (secondi) del prossimo messaggio
+let voiceRec = null;                   // registrazione vocale in corso
+let voiceUploadPending = false;
+let voiceUploadTimer = null;
 
 function peerReadTsFor(user) {
   return peerReadTs[String(user || "").toLowerCase()] || 0;
@@ -190,6 +198,15 @@ function connect() {
     if (attachmentUploadPending) {
       discardPendingAttachment();
       setComposerFeedback("Upload interrotto per la perdita della connessione. Riprova.", "error");
+    }
+    if (voiceUploadPending || pendingVoiceSend) {
+      voiceUploadPending = false;
+      pendingVoiceSend = null;
+      clearTimeout(voiceUploadTimer);
+      voiceUploadTimer = null;
+      messageInput.disabled = false;
+      updateSendButton();
+      setComposerFeedback("Messaggio vocale non inviato: connessione persa.", "error");
     }
     if (authShell.style.display !== "none") {
       setAuthMsg("Server non disponibile. Riprova tra qualche secondo.");
@@ -345,6 +362,27 @@ const profilePreviewAvatar = el("profilePreviewAvatar");
 const profilePreviewName = el("profilePreviewName");
 const participantSearch = el("participantSearch");
 const participantDirectory = el("participantDirectory");
+const bookmarkButton = el("bookmarkButton");
+const bookmarkPanel = el("bookmarkPanel");
+const bookmarkClose = el("bookmarkClose");
+const bookmarkList = el("bookmarkList");
+const pollButton = el("pollButton");
+const pollPanel = el("pollPanel");
+const pollQuestion = el("pollQuestion");
+const pollOptions = el("pollOptions");
+const pollAddOption = el("pollAddOption");
+const pollMultiple = el("pollMultiple");
+const pollCreateBtn = el("pollCreateBtn");
+const scheduleButton = el("scheduleButton");
+const schedulePanel = el("schedulePanel");
+const scheduleInput = el("scheduleInput");
+const scheduleSetBtn = el("scheduleSetBtn");
+const scheduleChip = el("scheduleChip");
+const voiceRecordButton = el("voiceRecordButton");
+const voiceRecorder = el("voiceRecorder");
+const voiceRecorderTime = el("voiceRecorderTime");
+const voiceRecorderCancel = el("voiceRecorderCancel");
+const voiceRecorderStop = el("voiceRecorderStop");
 
 function renderContacts() {
   contactList.innerHTML = "";
@@ -435,6 +473,7 @@ function renderCommunityList(communities) {
 
 function selectCommunity(communityId) {
   discardPendingAttachment();
+  resetComposerExtras();
   replyTarget = null;
   renderReplyPreview();
   closeForwardPicker();
@@ -696,6 +735,7 @@ function showCommunityInChat(community) {
 function selectCommunityChannel(channelId) {
   if (!currentCommunity || !currentCommunity.channels?.some(channel => channel.id === channelId)) return;
   discardPendingAttachment();
+  resetComposerExtras();
   replyTarget = null;
   renderReplyPreview();
   closeForwardPicker();
@@ -713,13 +753,15 @@ function selectCommunityChannel(channelId) {
   updateConvStatus();
   updateSendButton();
   send({ t: "community_channel_history", community: currentCommunityId, channel: channelId });
+  send({ t: "bookmark_list", scope: "community", community: currentCommunityId, channel: channelId });
 }
 
-function renderCommunityHistory(items, readTs = 0) {
+function renderCommunityHistory(items, readTs = 0, meta = {}) {
   const scope = activeScope()?.kind === "community"
     ? activeScope()
     : { kind: "community", community: currentCommunityId, channel: currentChannelId,
         key: `c:${currentCommunityId}:${currentChannelId}` };
+  rememberHistory(scope, meta.hasMore, meta.oldest);
   renderConvoList(scope, items || [], readTs);
 }
 
@@ -807,7 +849,36 @@ function renderMessageAttachment(attachment) {
     });
     return load;
   }
-  if (!localSettings.inlineImages && String(attachment.mime || "").startsWith("image/")) {
+  const mime = String(attachment.mime || "");
+  if (mime.startsWith("audio/")) {
+    const audio = document.createElement("audio");
+    audio.className = "message-attachment-audio";
+    audio.controls = true;
+    audio.preload = "none";
+    audio.src = source;
+    return audio;
+  }
+  if (!mime.startsWith("image/") && !mime.startsWith("video/")) {
+    const file = document.createElement("a");
+    file.className = "message-attachment-file";
+    file.href = source;
+    file.download = attachment.name || "allegato";
+    const icon = document.createElement("i");
+    icon.className = "ph ph-file-arrow-down";
+    icon.setAttribute("aria-hidden", "true");
+    const name = document.createElement("span");
+    name.className = "message-attachment-name";
+    name.textContent = attachment.name || "Allegato";
+    const meta = document.createElement("span");
+    meta.className = "message-attachment-meta";
+    meta.textContent = [
+      attachment.size ? `${Math.max(1, Math.round(attachment.size / 1024))} KB` : "",
+      mime.split("/")[1]?.toUpperCase() || "",
+    ].filter(Boolean).join(" · ");
+    file.append(icon, name, meta);
+    return file;
+  }
+  if (!localSettings.inlineImages && mime.startsWith("image/")) {
     const download = document.createElement("a");
     download.className = "message-attachment-download";
     download.href = source;
@@ -866,6 +937,94 @@ function replyQuoteEl(reply, scope) {
   quote.append(author, text);
   quote.addEventListener("click", () => jumpToMessage(scope, reply.id));
   return quote;
+}
+
+const TTL_PRESETS = [
+  { label: "Tra 1 ora", ttl: 3600 },
+  { label: "Tra 24 ore", ttl: 86400 },
+  { label: "Tra 7 giorni", ttl: 7 * 86400 },
+  { label: "Nessuna scadenza", ttl: 0 },
+];
+
+function openTtlPicker(msg, scope, anchor) {
+  document.getElementById("ttlPanel")?.remove();
+  const panel = document.createElement("div");
+  panel.className = "ttl-panel";
+  panel.id = "ttlPanel";
+  const title = document.createElement("div");
+  title.className = "ttl-panel-title";
+  title.textContent = "Auto-eliminazione";
+  panel.appendChild(title);
+  TTL_PRESETS.forEach(preset => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "ttl-option";
+    button.textContent = preset.label;
+    button.addEventListener("click", () => {
+      panel.remove();
+      send({ t: "msg_expire", scope: scope.kind, ...scopeFields(scope), id: msg.id, ttl: preset.ttl });
+    });
+    panel.appendChild(button);
+  });
+  document.body.appendChild(panel);
+  const rect = anchor.getBoundingClientRect();
+  panel.style.left = `${Math.min(rect.left, window.innerWidth - panel.offsetWidth - 12)}px`;
+  panel.style.top = `${Math.max(8, rect.top - panel.offsetHeight - 8)}px`;
+  const close = event => {
+    if (!panel.contains(event.target)) {
+      panel.remove();
+      document.removeEventListener("click", close, true);
+    }
+  };
+  setTimeout(() => document.addEventListener("click", close, true), 0);
+}
+
+function renderPollMessage(poll, msg, scope) {
+  if (!poll || typeof poll !== "object" || !Array.isArray(poll.options)) return null;
+  const box = document.createElement("div");
+  box.className = "msg-poll";
+  const question = document.createElement("div");
+  question.className = "msg-poll-question";
+  question.textContent = poll.q || "Sondaggio";
+  box.appendChild(question);
+  const options = poll.options.slice(0, 10);
+  const total = options.reduce((sum, option) => sum + (Array.isArray(option?.votes) ? option.votes.length : 0), 0);
+  const mine = new Set();
+  options.forEach((option, index) => {
+    (option?.votes || []).forEach(user => { if (user === me?.id) mine.add(index); });
+  });
+  options.forEach((option, index) => {
+    const votes = Array.isArray(option?.votes) ? option.votes : [];
+    const voted = mine.has(index);
+    const pct = total ? Math.round((votes.length / total) * 100) : 0;
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = `msg-poll-option${voted ? " voted" : ""}`;
+    row.disabled = !!msg.deleted;
+    const bar = document.createElement("span");
+    bar.className = "msg-poll-bar";
+    bar.style.width = `${pct}%`;
+    const label = document.createElement("span");
+    label.className = "msg-poll-label";
+    label.textContent = option?.text || "";
+    const count = document.createElement("span");
+    count.className = "msg-poll-count";
+    count.textContent = `${votes.length} · ${pct}%`;
+    row.append(bar, label, count);
+    row.addEventListener("click", event => {
+      event.stopPropagation();
+      if (msg.deleted) return;
+      send({ t: "msg_vote", scope: scope.kind, ...scopeFields(scope), id: msg.id, option: index });
+    });
+    box.appendChild(row);
+  });
+  const footer = document.createElement("div");
+  footer.className = "msg-poll-footer";
+  footer.textContent = poll.multiple
+    ? `Scelta multipla · ${total} voti`
+    : `${total} voti`;
+  box.appendChild(footer);
+  return box;
 }
 
 function renderReactionChips(parent, msg, scope) {
@@ -959,12 +1118,15 @@ function attachMessageActions(div, msg, scope) {
     button.setAttribute("aria-label", title);
     button.addEventListener("click", event => {
       event.stopPropagation();
-      run();
+      run(button);
     });
     bar.appendChild(button);
   };
   add("ph-arrow-bend-up-left", "Rispondi", () => startReply(msg, scope));
   add("ph-share-forward", "Inoltra", () => openForwardPicker(msg));
+  add(isBookmarked(scope, msg.id) ? "ph-bookmark-simple-fill" : "ph-bookmark-simple",
+      isBookmarked(scope, msg.id) ? "Rimuovi dai preferiti" : "Aggiungi ai preferiti",
+      button => toggleBookmark(msg, scope, button));
   if (canPinMessages(scope)) {
     add(msg.pinned ? "ph-push-pin-slash" : "ph-push-pin",
         msg.pinned ? "Rimuovi fissaggio" : "Fissa messaggio",
@@ -972,6 +1134,9 @@ function attachMessageActions(div, msg, scope) {
   }
   if (isMine && !msg.deleted) {
     add("ph-pencil-simple", "Modifica", () => startMessageEdit(div, msg, scope));
+  }
+  if ((isMine || canDeleteOthers(scope)) && !msg.deleted) {
+    add("ph-hourglass", "Scadenza automatica", button => openTtlPicker(msg, scope, button));
   }
   if (isMine || canDeleteOthers(scope)) {
     add("ph-trash", "Elimina", () => {
@@ -1017,6 +1182,8 @@ function buildMessageEl(msg, scope) {
     if (renderedAttachment) div.appendChild(renderedAttachment);
     const renderedVoice = renderVoiceMessage(msg.voice);
     if (renderedVoice) div.appendChild(renderedVoice);
+    const renderedPoll = renderPollMessage(msg.poll, msg, scope);
+    if (renderedPoll) div.appendChild(renderedPoll);
     renderReactionChips(div, msg, scope);
   }
   const metadata = document.createElement("span");
@@ -1024,6 +1191,21 @@ function buildMessageEl(msg, scope) {
   const ts = msgTs(msg);
   let metaText = ts ? new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
   if (msg.edited && !msg.deleted) metaText += metaText ? " · modificato" : "modificato";
+  const expiresAt = Number(msg.expires_at || 0);
+  if (expiresAt > 0 && !msg.deleted) {
+    const remaining = expiresAt * 1000 - Date.now();
+    if (remaining > 0) {
+      const hours = Math.floor(remaining / 3600000);
+      const minutes = Math.floor((remaining % 3600000) / 60000);
+      const label = hours > 0 ? `tra ${hours}h ${minutes}m` : `tra ${Math.max(1, minutes)}m`;
+      metaText += metaText ? ` · ⌛ ${label}` : `⌛ ${label}`;
+      const expiryMsg = msg;
+      setTimeout(() => {
+        const node = messages.querySelector(`.msg[data-msg-id="${CSS.escape(String(expiryMsg.id))}"]`);
+        if (node && isExpiredMessage(expiryMsg)) node.remove();
+      }, remaining + 500);
+    }
+  }
   if (isSelf && scope?.kind === "dm" && peerReadTsFor(scope.with) >= msgSeconds(msg)) {
     metaText += metaText ? " · Letto" : "Letto";
   }
@@ -1064,7 +1246,7 @@ function appendToMessages(div) {
 }
 
 function appendCommunityMessage(item) {
-  if (!item || (!item.text && !item.attachment && !item.voice && !item.deleted)) return;
+  if (!item || (!item.text && !item.attachment && !item.voice && !item.poll && !item.deleted)) return;
   const scope = activeScope()?.kind === "community"
     ? activeScope()
     : { kind: "community", community: currentCommunityId, channel: currentChannelId,
@@ -1078,7 +1260,7 @@ function startReply(msg, scope) {
   replyTarget = {
     scopeKey: scope.key, kind: scope.kind, ...scopeFields(scope),
     id: msg.id, from: msg.from,
-    text: (msg.text || "").slice(0, 140) || (msg.attachment ? "[allegato]" : "[messaggio]"),
+    text: (msg.text || "").slice(0, 140) || (msg.poll ? "[Sondaggio]" : msg.attachment ? "[allegato]" : msg.voice ? "[Messaggio vocale]" : "[messaggio]"),
   };
   renderReplyPreview();
   messageInput.focus();
@@ -1196,6 +1378,7 @@ function forwardMessageTo(target) {
   const src = forwardSource;
   if (!src) return;
   const text = String(src.text || "").trim()
+    || (src.poll ? "[Sondaggio]" : "")
     || (src.attachment ? "[Allegato]" : "")
     || (src.voice ? "[Messaggio vocale]" : "");
   if (!text) {
@@ -1203,6 +1386,15 @@ function forwardMessageTo(target) {
     return;
   }
   const payload = { ...target, text, forwarded_from: me?.username || me?.id };
+  if (src.poll && typeof src.poll === "object") {
+    payload.poll = {
+      q: String(src.poll.q || "").slice(0, 200),
+      options: (src.poll.options || []).slice(0, 10).map(option => ({
+        text: String(option?.text || "").slice(0, 80),
+      })),
+      multiple: !!src.poll.multiple,
+    };
+  }
   if (send(payload)) {
     const scope = activeScope();
     const sameTarget = target.t === "dm"
@@ -1298,6 +1490,72 @@ function refreshMessageElement(scopeKey, id) {
   node.replaceWith(buildMessageEl(msg, scope));
 }
 
+function isExpiredMessage(msg) {
+  const expires = Number(msg?.expires_at || 0);
+  return expires > 0 && expires * 1000 <= Date.now() && !msg.deleted;
+}
+
+function loadOlderButton(scope) {
+  const state = historyState.get(scope.key) || {};
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "load-older";
+  const loading = historyLoading.has(scope.key);
+  button.disabled = loading || !state.oldest;
+  button.innerHTML = loading
+    ? '<i class="ph ph-circle-notch" aria-hidden="true"></i> Caricamento...'
+    : '<i class="ph ph-arrow-up" aria-hidden="true"></i> Carica messaggi precedenti';
+  button.addEventListener("click", () => requestOlderMessages(scope));
+  return button;
+}
+
+function refreshLoadOlder(scope) {
+  messages.querySelector(".load-older")?.remove();
+  const state = historyState.get(scope.key);
+  if (state?.hasMore) {
+    const placeholder = messages.querySelector(".msg-placeholder");
+    const button = loadOlderButton(scope);
+    if (placeholder) messages.insertBefore(button, placeholder);
+    else messages.prepend(button);
+  }
+}
+
+function requestOlderMessages(scope) {
+  const state = historyState.get(scope.key);
+  if (!scope || !state?.oldest || historyLoading.has(scope.key)) return;
+  historyLoading.add(scope.key);
+  refreshLoadOlder(scope);
+  if (scope.kind === "community") {
+    send({ t: "community_channel_history", community: scope.community,
+           channel: scope.channel, before: state.oldest });
+  } else {
+    send({ t: "history", with: scope.with, before: state.oldest });
+  }
+}
+
+function prependHistory(scope, msgs, hasMore, oldest) {
+  const fresh = (msgs || []).filter(msg => msg?.id && !isExpiredMessage(msg));
+  fresh.forEach(msg => upsertCachedMessage(scope.key, msg));
+  trimCache(scope.key);
+  const first = messages.querySelector(".msg");
+  fresh.sort((a, b) => msgTs(a) - msgTs(b)).forEach(msg => {
+    const div = buildMessageEl(msg, scope);
+    if (first) messages.insertBefore(div, first);
+    else appendToMessages(div);
+    maybeRequestLinkPreview(div, msg);
+  });
+  historyLoading.delete(scope.key);
+  const prev = historyState.get(scope.key) || {};
+  historyState.set(scope.key, { hasMore: !!hasMore, oldest: oldest || prev.oldest });
+  refreshLoadOlder(scope);
+  renderPinnedBar(scope);
+}
+
+function rememberHistory(scope, hasMore, oldest) {
+  historyState.set(scope.key, { hasMore: !!hasMore, oldest: oldest || null });
+  historyLoading.delete(scope.key);
+}
+
 function renderConvoList(scope, list, readTs = 0) {
   activeReadTs = readTs || 0;
   convoCaches.set(scope.key, list.slice());
@@ -1310,6 +1568,7 @@ function renderConvoList(scope, list, readTs = 0) {
   const meId = String(me?.id || "").toLowerCase();
   let dividerDone = !activeReadTs;
   list.forEach(msg => {
+    if (isExpiredMessage(msg)) return;
     if (!dividerDone && String(msg.from || "").toLowerCase() !== meId && msgSeconds(msg) > activeReadTs) {
       messages.appendChild(unreadDividerEl());
       dividerDone = true;
@@ -1318,6 +1577,7 @@ function renderConvoList(scope, list, readTs = 0) {
     appendToMessages(div);
     maybeRequestLinkPreview(div, msg);
   });
+  refreshLoadOlder(scope);
   renderPinnedBar(scope);
   scrollBottom();
   reportRead(scope);
@@ -2265,6 +2525,7 @@ function failMemberAction(message) {
 
 function selectContact(username) {
   discardPendingAttachment();
+  resetComposerExtras();
   replyTarget = null;
   renderReplyPreview();
   closeForwardPicker();
@@ -2290,6 +2551,7 @@ function selectContact(username) {
   updateTypingIndicator();
   messages.appendChild(makePlaceholder("Seleziona un contatto per iniziare a chattare."));
   send({ t: "history", with: username });
+  send({ t: "bookmark_list", scope: "dm", with: String(username).toLowerCase() });
   messageInput.disabled = false;
   restoreDraft();
   updateConvStatus();
@@ -3763,8 +4025,9 @@ function setComposerFeedback(message, state = "") {
 
 function updateSendButton() {
   const hasAttachment = !!pendingChatAttachment?.hash;
+  const hasPoll = !!pendingPoll;
   sendBtn.disabled = messageInput.disabled || attachmentUploadPending ||
-    (!messageInput.value.trim() && !hasAttachment);
+    voiceUploadPending || (!messageInput.value.trim() && !hasAttachment && !hasPoll);
 }
 
 let composerEmojiText = null;
@@ -3834,9 +4097,15 @@ function uploadChatAttachment(file) {
   const mimeByExtension = {
     jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
     webp: "image/webp", gif: "image/gif", mp4: "video/mp4",
+    pdf: "application/pdf", txt: "text/plain", md: "text/markdown",
+    csv: "text/csv", json: "application/json", zip: "application/zip",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    mp3: "audio/mpeg", ogg: "audio/ogg", wav: "audio/wav",
   };
   if (!extension || !mimeByExtension[extension]) {
-    setComposerFeedback("Sono supportati solo JPG, PNG, WEBP, GIF e MP4.", "error");
+    setComposerFeedback("Formato non supportato. Usa immagini, video, documenti o audio.", "error");
     return;
   }
   if (!file.size || file.size > 1_700_000) {
@@ -3887,6 +4156,428 @@ function uploadChatAttachment(file) {
   reader.readAsDataURL(file);
 }
 
+// ---------- Sondaggi, invio programmato, preferiti, messaggi vocali ----------
+
+function pollOptionRow(value = "") {
+  const row = document.createElement("div");
+  row.className = "poll-option-row";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "poll-option-input";
+  input.placeholder = "Opzione";
+  input.maxLength = 80;
+  input.value = value;
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "icon-btn poll-option-remove";
+  remove.innerHTML = '<i class="ph ph-x" aria-hidden="true"></i>';
+  remove.title = "Rimuovi opzione";
+  remove.setAttribute("aria-label", "Rimuovi opzione");
+  remove.addEventListener("click", () => {
+    row.remove();
+    pollAddOption.disabled = pollOptions.querySelectorAll(".poll-option-row").length >= 10;
+  });
+  row.append(input, remove);
+  return row;
+}
+
+function resetPollComposer() {
+  pendingPoll = null;
+  pollPanel.classList.add("hidden");
+  pollButton.classList.remove("active");
+  pollButton.setAttribute("aria-expanded", "false");
+  pollOptions.replaceChildren();
+  pollQuestion.value = "";
+  pollMultiple.checked = false;
+  pollAddOption.disabled = false;
+  document.getElementById("pollChip")?.remove();
+}
+
+function renderPollChip() {
+  document.getElementById("pollChip")?.remove();
+  if (!pendingPoll) return;
+  const chip = document.createElement("div");
+  chip.className = "attachment-preview";
+  chip.id = "pollChip";
+  const label = document.createElement("span");
+  label.innerHTML = '<i class="ph ph-chart-bar" aria-hidden="true"></i> ';
+  label.append(document.createTextNode(
+    `Sondaggio: ${pendingPoll.q} · ${pendingPoll.options.length} opzioni${pendingPoll.multiple ? " · multipla" : ""}`
+  ));
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "icon-btn";
+  remove.setAttribute("aria-label", "Rimuovi sondaggio");
+  remove.innerHTML = '<i class="ph ph-x" aria-hidden="true"></i>';
+  remove.addEventListener("click", resetPollComposer);
+  chip.append(label, remove);
+  scheduleChip.insertAdjacentElement("afterend", chip);
+}
+
+function togglePollPanel(open) {
+  const show = open ?? pollPanel.classList.contains("hidden");
+  pollPanel.classList.toggle("hidden", !show);
+  pollButton.classList.toggle("active", show);
+  pollButton.setAttribute("aria-expanded", String(show));
+  if (show && !pollOptions.children.length) {
+    pollOptions.append(pollOptionRow(), pollOptionRow());
+    pollQuestion.focus();
+  }
+}
+
+function createPoll() {
+  const q = pollQuestion.value.trim();
+  const options = [...pollOptions.querySelectorAll(".poll-option-input")]
+    .map(input => input.value.trim()).filter(Boolean).slice(0, 10);
+  if (!q) {
+    setComposerFeedback("Scrivi la domanda del sondaggio.", "error");
+    pollQuestion.focus();
+    return;
+  }
+  if (options.length < 2) {
+    setComposerFeedback("Servono almeno due opzioni.", "error");
+    return;
+  }
+  pendingPoll = { q, options, multiple: pollMultiple.checked };
+  togglePollPanel(false);
+  renderPollChip();
+  updateSendButton();
+  setComposerFeedback("Sondaggio pronto: premi Invia per pubblicarlo.", "success");
+}
+
+function clearScheduleChip() {
+  scheduleChip.replaceChildren();
+  scheduleChip.classList.add("hidden");
+}
+
+function renderScheduleChip() {
+  clearScheduleChip();
+  if (!pendingScheduleAt) return;
+  scheduleChip.classList.remove("hidden");
+  const label = document.createElement("span");
+  label.innerHTML = '<i class="ph ph-clock" aria-hidden="true"></i> ';
+  label.append(document.createTextNode(
+    `Invio programmato: ${new Date(pendingScheduleAt * 1000).toLocaleString([], { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}`
+  ));
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "icon-btn";
+  remove.setAttribute("aria-label", "Annulla invio programmato");
+  remove.innerHTML = '<i class="ph ph-x" aria-hidden="true"></i>';
+  remove.addEventListener("click", () => {
+    pendingScheduleAt = 0;
+    clearScheduleChip();
+    schedulePanel.classList.add("hidden");
+    scheduleButton.classList.remove("active");
+    scheduleButton.setAttribute("aria-expanded", "false");
+    updateSendButton();
+  });
+  scheduleChip.append(label, remove);
+}
+
+function toggleSchedulePanel(open) {
+  const show = open ?? schedulePanel.classList.contains("hidden");
+  schedulePanel.classList.toggle("hidden", !show);
+  scheduleButton.classList.toggle("active", show);
+  scheduleButton.setAttribute("aria-expanded", String(show));
+  if (show) {
+    const pad = n => String(n).padStart(2, "0");
+    const localValue = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    const min = new Date(Date.now() + 60000);
+    scheduleInput.min = localValue(min);
+    if (!scheduleInput.value) scheduleInput.value = localValue(min);
+    scheduleInput.focus();
+  }
+}
+
+function setSchedule() {
+  const value = scheduleInput.value;
+  const ts = value ? Math.floor(new Date(value).getTime() / 1000) : 0;
+  const now = Math.floor(Date.now() / 1000);
+  if (!ts || ts <= now) {
+    setComposerFeedback("Scegli una data e un'ora future.", "error");
+    return;
+  }
+  if (ts > now + 30 * 86400) {
+    setComposerFeedback("Massimo 30 giorni in anticipo.", "error");
+    return;
+  }
+  pendingScheduleAt = ts;
+  toggleSchedulePanel(false);
+  renderScheduleChip();
+  updateSendButton();
+  setComposerFeedback("Invio programmato. Premi Invia per confermare.", "success");
+}
+
+function resetComposerExtras() {
+  resetPollComposer();
+  pendingScheduleAt = 0;
+  clearScheduleChip();
+  schedulePanel.classList.add("hidden");
+  scheduleButton.classList.remove("active");
+  scheduleButton.setAttribute("aria-expanded", "false");
+  bookmarkPanel.classList.add("hidden");
+  bookmarkButton.classList.remove("active");
+  cancelVoiceRecording(true);
+}
+
+// ---------- Preferiti ----------
+
+function bookmarkScopeKey(scope) {
+  return scope?.kind === "community"
+    ? `c:${scope.community}:${scope.channel}`
+    : `dm:${String(scope?.with || "").toLowerCase()}`;
+}
+
+function isBookmarked(scope, id) {
+  return bookmarkedMsgs.has(`${bookmarkScopeKey(scope)}:${id}`);
+}
+
+function toggleBookmarkPanel(open) {
+  const show = open ?? bookmarkPanel.classList.contains("hidden");
+  bookmarkPanel.classList.toggle("hidden", !show);
+  bookmarkButton.classList.toggle("active", show);
+  if (show) {
+    const scope = activeScope();
+    bookmarkList.replaceChildren();
+    const empty = document.createElement("div");
+    empty.className = "msg-search-empty";
+    empty.textContent = "Caricamento preferiti...";
+    bookmarkList.appendChild(empty);
+    if (scope) send({ t: "bookmark_list", scope: scope.kind, ...scopeFields(scope) });
+    else bookmarkList.replaceChildren();
+  }
+}
+
+function renderBookmarkList(m) {
+  bookmarkList.replaceChildren();
+  const items = m.items || [];
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "msg-search-empty";
+    empty.textContent = "Nessun preferito in questa conversazione.";
+    bookmarkList.appendChild(empty);
+    return;
+  }
+  const scope = scopeFromKey(
+    m.scope === "community" ? `c:${m.community}:${m.channel}` : `dm:${String(m.with || "").toLowerCase()}`
+  ) || activeScope();
+  items.forEach(item => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "msg-search-result bookmark-result";
+    const author = document.createElement("span");
+    author.className = "msg-search-author";
+    author.textContent = authorLabel(item.from);
+    const snippet = document.createElement("span");
+    snippet.className = "msg-search-snippet";
+    snippet.textContent = item.text ||
+      (item.has_poll ? "[Sondaggio]" : item.has_voice ? "[Messaggio vocale]" : "[Allegato]");
+    const time = document.createElement("span");
+    time.className = "msg-search-time";
+    const ts = msgTs({ ts: item.ts });
+    time.textContent = ts ? new Date(ts).toLocaleString([], { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "";
+    button.append(author, snippet, time);
+    button.addEventListener("click", () => {
+      if (scope) {
+        toggleBookmarkPanel(false);
+        jumpToMessage(scope, item.id);
+      }
+    });
+    bookmarkList.appendChild(button);
+  });
+}
+
+function toggleBookmark(msg, scope, button) {
+  const marked = isBookmarked(scope, msg.id);
+  send({
+    t: marked ? "bookmark_remove" : "bookmark_add",
+    scope: scope.kind, ...scopeFields(scope), id: msg.id,
+  });
+  const key = `${bookmarkScopeKey(scope)}:${msg.id}`;
+  if (marked) bookmarkedMsgs.delete(key);
+  else bookmarkedMsgs.add(key);
+  if (button) {
+    button.classList.toggle("active", !marked);
+    button.title = marked ? "Aggiungi ai preferiti" : "Rimuovi dai preferiti";
+    button.setAttribute("aria-label", button.title);
+    button.querySelector("i")?.classList.toggle("ph-bookmark-simple", marked);
+    button.querySelector("i")?.classList.toggle("ph-bookmark-simple-fill", !marked);
+  }
+}
+
+// ---------- Messaggi vocali (registrazione WAV) ----------
+
+const VOICE_SAMPLE_RATE = 8000;   // 16 bit mono: 60s sta sotto MAX_VOICE (1,1 MB)
+const VOICE_MAX_SECONDS = 60;
+
+function formatVoiceTime(totalSeconds) {
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function startVoiceRecording() {
+  if (voiceRec || voiceUploadPending) return;
+  if (!selectedContact && !(currentCommunityId && currentChannelId)) {
+    setComposerFeedback("Apri una conversazione prima di registrare un vocale.", "error");
+    return;
+  }
+  if (memberActionPending || pendingInviteResponse || attachmentUploadPending) {
+    setComposerFeedback("Attendi il completamento dell'operazione in corso.", "error");
+    return;
+  }
+  if (!navigator.mediaDevices?.getUserMedia) {
+    setComposerFeedback("Registrazione non supportata da questo browser.", "error");
+    return;
+  }
+  navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    const audioCtx = new AudioCtx();
+    const source = audioCtx.createMediaStreamSource(stream);
+    const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+    const chunks = [];
+    processor.onaudioprocess = event => {
+      chunks.push(new Float32Array(event.inputBuffer.getChannelData(0)));
+    };
+    source.connect(processor);
+    processor.connect(audioCtx.destination);
+    const startedAt = Date.now();
+    voiceRec = {
+      stream, audioCtx, source, processor, chunks, startedAt,
+      timer: null, autoStop: null,
+    };
+    voiceRecorder.classList.remove("hidden");
+    messageInput.disabled = true;
+    updateSendButton();
+    const tick = () => {
+      const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+      voiceRecorderTime.textContent = formatVoiceTime(elapsed);
+      voiceRec.timer = setTimeout(tick, 500);
+    };
+    tick();
+    voiceRec.autoStop = setTimeout(() => finishVoiceRecording(), VOICE_MAX_SECONDS * 1000);
+  }).catch(() => {
+    setComposerFeedback("Microfono non disponibile o permesso negato.", "error");
+  });
+}
+
+function cancelVoiceRecording(silent = false) {
+  if (!voiceRec) return;
+  clearTimeout(voiceRec.timer);
+  clearTimeout(voiceRec.autoStop);
+  voiceRec.stream.getTracks().forEach(track => track.stop());
+  voiceRec.source.disconnect();
+  voiceRec.processor.disconnect();
+  voiceRec.audioCtx.close().catch(() => {});
+  voiceRec = null;
+  voiceRecorder.classList.add("hidden");
+  messageInput.disabled = false;
+  updateSendButton();
+  if (!silent) setComposerFeedback("Registrazione annullata.", "");
+}
+
+function floatTo16BitWav(chunks, sourceRate) {
+  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const ratio = sourceRate / VOICE_SAMPLE_RATE;
+  const outLength = Math.floor(total / ratio);
+  const pcm = new Int16Array(outLength);
+  const starts = new Float64Array(chunks.length + 1);
+  for (let i = 0; i < chunks.length; i++) starts[i + 1] = starts[i] + chunks[i].length;
+  let read = 0;
+  for (let i = 0; i < outLength; i++) {
+    const position = i * ratio;
+    while (read + 1 < chunks.length && position >= starts[read + 1]) read++;
+    const chunk = chunks[read];
+    const offset = position - starts[read];
+    const value = chunk[Math.min(chunk.length - 1, Math.floor(offset))] || 0;
+    pcm[i] = Math.max(-1, Math.min(1, value)) * (value < 0 ? 0x8000 : 0x7fff);
+  }
+  const buffer = new ArrayBuffer(44 + pcm.length * 2);
+  const view = new DataView(buffer);
+  const writeString = (offset, text) => {
+    for (let i = 0; i < text.length; i++) view.setUint8(offset + i, text.charCodeAt(i));
+  };
+  writeString(0, "RIFF");
+  view.setUint32(4, 36 + pcm.length * 2, true);
+  writeString(8, "WAVE");
+  writeString(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);            // PCM
+  view.setUint16(22, 1, true);            // mono
+  view.setUint32(24, VOICE_SAMPLE_RATE, true);
+  view.setUint32(28, VOICE_SAMPLE_RATE * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeString(36, "data");
+  view.setUint32(40, pcm.length * 2, true);
+  for (let i = 0; i < pcm.length; i++) view.setInt16(44 + i * 2, pcm[i], true);
+  return buffer;
+}
+
+function wavToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const step = 0x8000;
+  for (let i = 0; i < bytes.length; i += step) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + step));
+  }
+  return btoa(binary);
+}
+
+function finishVoiceRecording() {
+  if (!voiceRec) return;
+  const rec = voiceRec;
+  clearTimeout(rec.timer);
+  clearTimeout(rec.autoStop);
+  rec.stream.getTracks().forEach(track => track.stop());
+  voiceRec = null;
+  voiceRecorder.classList.add("hidden");
+  const duration = Math.min(VOICE_MAX_SECONDS, Math.max(1, Math.round((Date.now() - rec.startedAt) / 1000)));
+  try {
+    const wav = floatTo16BitWav(rec.chunks, rec.audioCtx.sampleRate);
+    rec.source.disconnect();
+    rec.processor.disconnect();
+    rec.audioCtx.close().catch(() => {});
+    if (wav.byteLength > 1_100_000 || wav.byteLength <= 44) {
+      messageInput.disabled = false;
+      updateSendButton();
+      setComposerFeedback("Registrazione non valida o troppo lunga.", "error");
+      return;
+    }
+    voiceUploadPending = true;
+    updateSendButton();
+    voiceUploadTimer = setTimeout(() => {
+      if (!voiceUploadPending) return;
+      voiceUploadPending = false;
+      pendingVoiceSend = null;
+      messageInput.disabled = false;
+      updateSendButton();
+      setComposerFeedback("Upload del vocale scaduto. Riprova.", "error");
+    }, 20000);
+    const scope = activeScope();
+    pendingVoiceSend = {
+      duration,
+      target: scope?.kind === "community"
+        ? { t: "community_channel_send", community: scope.community, channel: scope.channel }
+        : { t: "dm", to: scope?.with || selectedContact },
+    };
+    if (!send({ t: "media_put", kind: "voice", extension: "wav", data: wavToBase64(wav) })) {
+      voiceUploadPending = false;
+      pendingVoiceSend = null;
+      messageInput.disabled = false;
+      updateSendButton();
+      setComposerFeedback("Upload non avviato. Controlla la connessione e riprova.", "error");
+    }
+  } catch {
+    messageInput.disabled = false;
+    updateSendButton();
+    setComposerFeedback("Impossibile elaborare la registrazione.", "error");
+  }
+}
+
+let pendingVoiceSend = null;
+
 function sendChatMessage() {
   const text = messageInput.value.trim();
   if (attachmentUploadPending) {
@@ -3897,7 +4588,12 @@ function sendChatMessage() {
     hash: pendingChatAttachment.hash,
     name: pendingChatAttachment.name,
   } : null;
-  if (!text && !attachment) return;
+  const poll = pendingPoll ? {
+    q: pendingPoll.q,
+    options: pendingPoll.options.map(option => ({ text: option })),
+    multiple: !!pendingPoll.multiple,
+  } : null;
+  if (!text && !attachment && !poll) return;
   const target = attachment
     ? pendingChatAttachment.target
     : currentCommunityId && currentChannelId
@@ -3906,11 +4602,14 @@ function sendChatMessage() {
         ? { to: selectedContact }
         : null;
   const reply = replyPayload();
+  const scheduled = pendingScheduleAt > Math.floor(Date.now() / 1000) ? pendingScheduleAt : 0;
   const payload = target?.community
     ? { t: "community_channel_send", ...target, text,
-        ...(attachment ? { attachment } : {}), ...(reply ? { reply_to: reply } : {}) }
+        ...(attachment ? { attachment } : {}), ...(poll ? { poll } : {}),
+        ...(reply ? { reply_to: reply } : {}), ...(scheduled ? { send_at: scheduled } : {}) }
     : { t: "dm", to: target?.to || selectedContact, text,
-        ...(attachment ? { attachment } : {}), ...(reply ? { reply_to: reply } : {}) };
+        ...(attachment ? { attachment } : {}), ...(poll ? { poll } : {}),
+        ...(reply ? { reply_to: reply } : {}), ...(scheduled ? { send_at: scheduled } : {}) };
   if (!payload.to && !payload.community) {
     setComposerFeedback("Seleziona una conversazione o un canale.", "error");
     return;
@@ -3930,7 +4629,10 @@ function sendChatMessage() {
   clearDraft(sentScope);
   renderComposerEmoji();
   discardPendingAttachment();
-  setComposerFeedback("", "");
+  resetPollComposer();
+  pendingScheduleAt = 0;
+  clearScheduleChip();
+  setComposerFeedback(scheduled ? "Messaggio programmato." : "", "");
   updateSendButton();
 }
 
@@ -4106,6 +4808,30 @@ messageInput.addEventListener("keydown", event => {
   }
 });
 sendBtn.addEventListener("click", sendChatMessage);
+
+bookmarkButton.addEventListener("click", () => toggleBookmarkPanel());
+bookmarkClose.addEventListener("click", () => toggleBookmarkPanel(false));
+
+pollButton.addEventListener("click", () => togglePollPanel());
+pollAddOption.addEventListener("click", () => {
+  const rows = pollOptions.querySelectorAll(".poll-option-row");
+  if (rows.length >= 10) return;
+  pollOptions.appendChild(pollOptionRow());
+  pollAddOption.disabled = pollOptions.querySelectorAll(".poll-option-row").length >= 10;
+  pollOptions.querySelector(".poll-option-row:last-child input")?.focus();
+});
+pollCreateBtn.addEventListener("click", createPoll);
+
+scheduleButton.addEventListener("click", () => toggleSchedulePanel());
+scheduleSetBtn.addEventListener("click", setSchedule);
+
+voiceRecordButton.addEventListener("click", () => {
+  if (voiceRec) cancelVoiceRecording();
+  else startVoiceRecording();
+});
+voiceRecorderCancel.addEventListener("click", () => cancelVoiceRecording());
+voiceRecorderStop.addEventListener("click", finishVoiceRecording);
+
 el("searchButton").addEventListener("click", () => toggleMsgSearch());
 el("msgSearchClose").addEventListener("click", () => toggleMsgSearch(false));
 let msgSearchDebounce = null;
@@ -4281,7 +5007,16 @@ function onMessage(event) {
 
     case "community_history":
       if (m.community === currentCommunityId && m.channel === currentChannelId) {
-        renderCommunityHistory(m.messages || [], m.read_ts || 0);
+        const scope = rememberScope({
+          kind: "community", community: m.community, channel: m.channel,
+          key: `c:${m.community}:${m.channel}`,
+        });
+        if (m.before) {
+          prependHistory(scope, m.messages || [], m.has_more, m.oldest);
+        } else {
+          renderCommunityHistory(m.messages || [], m.read_ts || 0,
+                                 { hasMore: m.has_more, oldest: m.oldest });
+        }
       }
       break;
 
@@ -4294,7 +5029,7 @@ function onMessage(event) {
         `cmsg:${m.community}:${m.channel}`,
         `${communityName} · ${senderName}`,
         communityName,
-        `${senderName}: ${String(msg?.text || "").slice(0, 120)}`,
+        `${senderName}: ${String(msg?.text || (msg?.poll ? "[Sondaggio]" : "") || (msg?.attachment ? "[allegato]" : "") || (msg?.voice ? "[vocale]" : "")).slice(0, 120)}`,
         isSelf,
       );
       const scope = rememberScope({
@@ -4305,7 +5040,7 @@ function onMessage(event) {
         upsertCachedMessage(scope.key, msg);
         trimCache(scope.key);
       }
-      if (m.community === currentCommunityId && m.channel === currentChannelId && msg?.id) {
+      if (m.community === currentCommunityId && m.channel === currentChannelId && msg?.id && !isExpiredMessage(msg)) {
         const node = messages.querySelector(`.msg[data-msg-id="${CSS.escape(String(msg.id))}"]`);
         if (!node) {
           const div = buildMessageEl(msg, scope);
@@ -4435,9 +5170,19 @@ function onMessage(event) {
       el("quickContactFeedback").className = "success";
       break;
 
-    case "history":
-      renderHistory(m.msgs || [], m.with, m.read_ts || 0);
+    case "history": {
+      const scope = activeScope()?.kind === "dm"
+        ? activeScope()
+        : { kind: "dm", with: String(m.with || "").toLowerCase(),
+            key: `dm:${String(m.with || "").toLowerCase()}` };
+      if (m.before && scope.key === activeScope()?.key) {
+        prependHistory(scope, m.msgs || [], m.has_more, m.oldest);
+      } else if (!m.before) {
+        renderHistory(m.msgs || [], m.with, m.read_ts || 0,
+                      { hasMore: m.has_more, oldest: m.oldest });
+      }
       break;
+    }
 
     case "dm": {
       const from = m.from || "";
@@ -4447,7 +5192,7 @@ function onMessage(event) {
         `dm:${peer}`,
         contactProfile(from)?.name || from || "Sconosciuto",
         contactProfile(from)?.name || from || "CiaoChat",
-        String(m.text || (m.attachment ? "[allegato]" : "") || (m.voice ? "[vocale]" : "")).slice(0, 120),
+        String(m.text || (m.poll ? "[Sondaggio]" : "") || (m.attachment ? "[allegato]" : "") || (m.voice ? "[vocale]" : "")).slice(0, 120),
         isSelf,
       );
       if (m.id && peer) {
@@ -4455,7 +5200,7 @@ function onMessage(event) {
         upsertCachedMessage(scope.key, m);
         trimCache(scope.key);
         const active = activeScope();
-        if (active?.kind === "dm" && active.with === peer) {
+        if (active?.kind === "dm" && active.with === peer && !isExpiredMessage(m)) {
           const node = messages.querySelector(`.msg[data-msg-id="${CSS.escape(String(m.id))}"]`);
           if (!node) {
             const div = buildMessageEl(m, scope);
@@ -4480,7 +5225,7 @@ function onMessage(event) {
 
     case "msg_deleted": {
       const scopeKey = m.scope === "community" ? `c:${m.community}:${m.channel}` : `dm:${String(m.with || "").toLowerCase()}`;
-      patchCachedMessage(scopeKey, m.id, { deleted: true, text: "", attachment: null, voice: null, reactions: {} });
+      patchCachedMessage(scopeKey, m.id, { deleted: true, text: "", attachment: null, voice: null, poll: null, reactions: {} });
       const node = messages.querySelector(`.msg[data-msg-id="${CSS.escape(String(m.id))}"]`);
       if (node) node.replaceWith(buildMessageEl(
         (convoCaches.get(scopeKey) || []).find(item => item.id === m.id) || { id: m.id, deleted: true },
@@ -4502,6 +5247,65 @@ function onMessage(event) {
       refreshMessageElement(scopeKey, m.id);
       const scope = scopeFromKey(scopeKey);
       if (scope && activeScope()?.key === scope.key) renderPinnedBar(scope);
+      break;
+    }
+
+    case "msg_poll": {
+      const scopeKey = m.scope === "community" ? `c:${m.community}:${m.channel}` : `dm:${String(m.with || "").toLowerCase()}`;
+      patchCachedMessage(scopeKey, m.id, { poll: m.poll });
+      refreshMessageElement(scopeKey, m.id);
+      break;
+    }
+
+    case "msg_expire": {
+      const scopeKey = m.scope === "community" ? `c:${m.community}:${m.channel}` : `dm:${String(m.with || "").toLowerCase()}`;
+      patchCachedMessage(scopeKey, m.id, { expires_at: m.expires_at || 0 });
+      refreshMessageElement(scopeKey, m.id);
+      break;
+    }
+
+    case "msg_scheduled":
+      setComposerFeedback("Messaggio programmato correttamente.", "success");
+      break;
+
+    case "msg_scheduled_sent": {
+      const scopeKey = m.scope === "community"
+        ? `c:${m.community}:${m.channel}`
+        : `dm:${String(m.with || "").toLowerCase()}`;
+      const scope = scopeFromKey(scopeKey);
+      if (scope && activeScope()?.key === scope.key) {
+        appendSystemMessage("Messaggio programmato inviato.");
+      }
+      break;
+    }
+
+    case "bookmark_list": {
+      const scopeKey = m.scope === "community"
+        ? `c:${m.community}:${m.channel}`
+        : `dm:${String(m.with || "").toLowerCase()}`;
+      (m.items || []).forEach(item => {
+        if (item?.id) bookmarkedMsgs.add(`${scopeKey}:${item.id}`);
+      });
+      if (!bookmarkPanel.classList.contains("hidden")) renderBookmarkList(m);
+      break;
+    }
+
+    case "bookmark_saved":
+    case "bookmark_removed": {
+      const scopeKey = m.scope === "community"
+        ? `c:${m.community}:${m.channel}`
+        : `dm:${String(m.with || "").toLowerCase()}`;
+      const key = `${scopeKey}:${m.id}`;
+      if (m.t === "bookmark_saved") bookmarkedMsgs.add(key);
+      else bookmarkedMsgs.delete(key);
+      if (!bookmarkPanel.classList.contains("hidden")) {
+        send({
+          t: "bookmark_list", scope: m.scope,
+          ...(m.scope === "community"
+            ? { community: m.community, channel: m.channel }
+            : { with: m.with }),
+        });
+      }
       break;
     }
 
@@ -4574,14 +5378,17 @@ function onMessage(event) {
 
     case "media":
       mediaRequests.delete(m.hash);
-      if (typeof m.data === "string" && [
-        "image/jpeg", "image/png", "image/webp", "image/gif", "video/mp4",
-      ].includes(m.mime)) {
+      if (typeof m.data === "string" && typeof m.mime === "string" && m.mime) {
         mediaCache.set(m.hash, `data:${m.mime};base64,${m.data}`);
         messages.querySelectorAll("[data-attachment-hash]").forEach(node => {
           if (node.dataset.attachmentHash !== m.hash) return;
           const replacement = renderMessageAttachment({ hash: m.hash, mime: m.mime });
           if (replacement) node.replaceWith(replacement);
+        });
+        messages.querySelectorAll("[data-voice-hash]").forEach(node => {
+          if (node.dataset.voiceHash !== m.hash) return;
+          const replacement = renderVoiceMessage({ hash: m.hash });
+          if (replacement) node.closest(".msg-voice")?.replaceWith(replacement);
         });
         renderContacts();
         renderSelectedContact();
@@ -4602,6 +5409,18 @@ function onMessage(event) {
         renderPendingAttachment();
         updateSendButton();
         setComposerFeedback("Allegato pronto. Premi Invia per spedirlo.", "success");
+      } else if (m.kind === "voice" && pendingVoiceSend) {
+        clearTimeout(voiceUploadTimer);
+        voiceUploadTimer = null;
+        voiceUploadPending = false;
+        messageInput.disabled = false;
+        const pending = pendingVoiceSend;
+        pendingVoiceSend = null;
+        const voicePayload = { ...pending.target, voice: { hash: m.hash, dur: pending.duration } };
+        if (!send(voicePayload)) {
+          setComposerFeedback("Messaggio vocale non inviato: connessione non disponibile.", "error");
+        }
+        updateSendButton();
       } else if (me && (m.kind === "avatar" || m.kind === "banner")) {
         const preview = me[`${m.kind}_preview`];
         if (preview) mediaCache.set(m.hash, preview);
@@ -4639,6 +5458,16 @@ function onMessage(event) {
       }
       if (activeCall && activeCall.state !== "active") {
         finishCall(m.text || "Impossibile avviare la chiamata.");
+        break;
+      }
+      if (voiceUploadPending || pendingVoiceSend) {
+        voiceUploadPending = false;
+        pendingVoiceSend = null;
+        clearTimeout(voiceUploadTimer);
+        voiceUploadTimer = null;
+        messageInput.disabled = false;
+        updateSendButton();
+        setComposerFeedback(m.text || "Invio del messaggio vocale non riuscito.", "error");
         break;
       }
       if (attachmentUploadPending || pendingChatAttachment?.hash) {
@@ -4717,11 +5546,12 @@ function onMessage(event) {
   }
 }
 
-function renderHistory(msgs, withUser, readTs = 0) {
+function renderHistory(msgs, withUser, readTs = 0, meta = {}) {
   const scope = activeScope()?.kind === "dm"
     ? activeScope()
     : { kind: "dm", with: String(withUser || "").toLowerCase(),
         key: `dm:${String(withUser || "").toLowerCase()}` };
+  rememberHistory(scope, meta.hasMore, meta.oldest);
   renderConvoList(scope, msgs || [], readTs);
 }
 

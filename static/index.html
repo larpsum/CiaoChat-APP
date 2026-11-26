@@ -151,6 +151,7 @@
         <div class="conv-actions">
           <button class="icon-btn" id="profileSettingsHeaderBtn" type="button" title="Impostazioni" aria-label="Impostazioni"><i class="ph ph-gear" aria-hidden="true"></i></button>
           <button class="icon-btn" id="searchButton" type="button" title="Cerca" aria-label="Cerca"><i class="ph ph-magnifying-glass" aria-hidden="true"></i></button>
+          <button class="icon-btn" id="bookmarkButton" type="button" title="Preferiti" aria-label="Preferiti della conversazione"><i class="ph ph-bookmark-simple" aria-hidden="true"></i></button>
           <button class="icon-btn" id="microphoneButton" type="button" title="Test microfono" aria-label="Test microfono"><i class="ph ph-microphone" aria-hidden="true"></i></button>
           <button class="icon-btn" id="voiceCallButton" type="button" title="Chiamata vocale" aria-label="Chiamata vocale"><i class="ph ph-phone" aria-hidden="true"></i></button>
           <button class="icon-btn" id="callButton" type="button" title="Videochiamata" aria-label="Videochiamata"><i class="ph ph-video-camera" aria-hidden="true"></i></button>
@@ -166,6 +167,11 @@
         <button class="icon-btn" id="msgSearchClose" type="button" aria-label="Chiudi ricerca"><i class="ph ph-x" aria-hidden="true"></i></button>
         <div class="msg-search-results" id="msgSearchResults"></div>
       </div>
+      <div class="msg-search-panel hidden" id="bookmarkPanel">
+        <span class="bookmark-panel-title"><i class="ph ph-bookmark-simple" aria-hidden="true"></i> Preferiti</span>
+        <button class="icon-btn" id="bookmarkClose" type="button" aria-label="Chiudi preferiti"><i class="ph ph-x" aria-hidden="true"></i></button>
+        <div class="msg-search-results" id="bookmarkList"></div>
+      </div>
       <nav class="community-channel-bar hidden" id="communityChannelBar" aria-label="Canali"></nav>
       <div class="pinned-bar hidden" id="pinnedBar"></div>
 
@@ -180,9 +186,19 @@
       <!-- Composer -->
       <div class="composer">
         <div class="reply-preview hidden" id="replyPreview"></div>
+        <div class="voice-recorder hidden" id="voiceRecorder">
+          <span class="voice-recorder-dot" aria-hidden="true"></span>
+          <span class="voice-recorder-time" id="voiceRecorderTime">0:00</span>
+          <span class="voice-recorder-hint">Registrazione vocale</span>
+          <button class="icon-btn" id="voiceRecorderCancel" type="button" title="Annulla" aria-label="Annulla registrazione"><i class="ph ph-trash" aria-hidden="true"></i></button>
+          <button class="icon-btn voice-recorder-stop" id="voiceRecorderStop" type="button" title="Invia vocale" aria-label="Invia messaggio vocale"><i class="ph ph-paper-plane-tilt" aria-hidden="true"></i></button>
+        </div>
         <div class="composer-inner">
-          <input id="attachmentInput" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4" hidden>
-          <button class="icon-btn add" id="attachButton" type="button" title="Allega immagine o video" aria-label="Allega immagine o video"><i class="ph ph-paperclip" aria-hidden="true"></i></button>
+          <input id="attachmentInput" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,application/pdf,text/plain,text/markdown,text/csv,application/json,application/zip,.docx,.xlsx,.pptx,audio/mpeg,audio/ogg,audio/wav,.mp3,.ogg,.wav" hidden>
+          <button class="icon-btn add" id="attachButton" type="button" title="Allega file" aria-label="Allega file"><i class="ph ph-paperclip" aria-hidden="true"></i></button>
+          <button class="icon-btn composer-tool" id="voiceRecordButton" type="button" title="Messaggio vocale" aria-label="Registra messaggio vocale"><i class="ph ph-microphone" aria-hidden="true"></i></button>
+          <button class="icon-btn composer-tool" id="pollButton" type="button" title="Sondaggio" aria-label="Crea sondaggio" aria-expanded="false"><i class="ph ph-chart-bar" aria-hidden="true"></i></button>
+          <button class="icon-btn composer-tool" id="scheduleButton" type="button" title="Programma invio" aria-label="Programma invio" aria-expanded="false"><i class="ph ph-clock" aria-hidden="true"></i></button>
           <button class="icon-btn composer-tool" id="emojiButton" type="button" title="Emoji" aria-label="Inserisci emoji" aria-expanded="false"><i class="ph ph-smiley" aria-hidden="true"></i></button>
           <button class="icon-btn composer-tool" id="boldButton" type="button" title="Grassetto" aria-label="Grassetto"><i class="ph ph-text-b" aria-hidden="true"></i></button>
           <button class="icon-btn composer-tool" id="italicButton" type="button" title="Corsivo" aria-label="Corsivo"><i class="ph ph-text-italic" aria-hidden="true"></i></button>
@@ -197,6 +213,18 @@
           <button class="btn btn-primary btn-sm" id="sendBtn" type="button" disabled><i class="ph ph-paper-plane-tilt" aria-hidden="true"></i><span>Invia</span></button>
           <div class="composer-inline-panel emoji-picker hidden" id="emojiPicker" role="group" aria-label="Emoji"></div>
           <div class="composer-inline-panel hidden" id="mentionPicker" role="group" aria-label="Menziona partecipante"></div>
+          <div class="composer-inline-panel hidden" id="pollPanel" role="group" aria-label="Crea sondaggio">
+            <input type="text" id="pollQuestion" placeholder="Domanda del sondaggio" maxlength="200">
+            <div class="poll-options" id="pollOptions"></div>
+            <button class="btn btn-outline btn-sm" id="pollAddOption" type="button">+ Opzione</button>
+            <label class="poll-multiple"><input type="checkbox" id="pollMultiple"> Scelta multipla</label>
+            <button class="btn btn-primary btn-sm" id="pollCreateBtn" type="button">Crea sondaggio</button>
+          </div>
+          <div class="composer-inline-panel hidden" id="schedulePanel" role="group" aria-label="Programma invio">
+            <input type="datetime-local" id="scheduleInput">
+            <button class="btn btn-primary btn-sm" id="scheduleSetBtn" type="button">Programma</button>
+          </div>
+          <div class="attachment-preview hidden" id="scheduleChip"></div>
           <div class="attachment-preview hidden" id="attachmentPreview"></div>
           <div class="composer-feedback" id="composerFeedback" role="status" aria-live="polite"></div>
         </div>

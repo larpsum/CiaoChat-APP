@@ -69,7 +69,10 @@ OTP_MAX_TRIES = 5
 PBKDF2_ITERATIONS = 200_000
 MAX_TOKENS_PER_USER = 5
 HISTORY_LIMIT = 200
+PAGE_SIZE = 50                     # dimensione di una pagina di cronologia (carica altri)
 MAX_TEXT = 2000
+MAX_SCHEDULE_SECONDS = 30 * 86400  # un messaggio puo' essere programmato al massimo tra 30 giorni
+MAX_TTL_SECONDS = 30 * 86400       # auto-eliminazione automatica di un messaggio
 MAX_LINE = 2_500_000                 # byte massimi per riga JSON (un vocale in base64 sta largamente dentro)
 MAX_IMAGE = 600_000                  # byte per avatar / banner
 MAX_PROFILE_MEDIA = 1_700_000         # keeps base64 uploads below MAX_LINE
@@ -223,6 +226,34 @@ def fb_last(path, limit):
     if isinstance(data, list):
         data = {str(i): v for i, v in enumerate(data) if v is not None}
     return [(k, data[k]) for k in sorted(data)]
+
+
+def fb_page(path, before=None, limit=PAGE_SIZE):
+    """Pagina di cronologia. Senza `before` restituisce gli ultimi `limit` messaggi;
+    con `before` (chiave di un messaggio) quelli precedenti. Ritorna (items, has_more, oldest_key)."""
+    query = firebase_ref(path).order_by_key()
+    if before:
+        query = query.end_at(str(before))
+    data = query.limit_to_last(limit + 2).get()
+    if not data:
+        return [], False, None
+    if isinstance(data, list):
+        data = {str(i): v for i, v in enumerate(data) if v is not None}
+    keys = sorted(k for k in data if k != str(before or ""))
+    has_more = len(keys) > limit
+    keys = keys[-limit:]
+    return [(k, data[k]) for k in keys], has_more, (keys[0] if keys else None)
+
+
+def fb_due(node, field, limit=50):
+    """Figli di `node` il cui campo `field` e' <= now, ordinati per quel campo."""
+    data = (firebase_ref(node).order_by_child(field)
+            .start_at(0).end_at(now()).limit_to_first(limit).get())
+    if not data:
+        return []
+    if isinstance(data, list):
+        return [(str(i), v) for i, v in enumerate(data) if isinstance(v, dict)]
+    return [(k, v) for k, v in data.items() if isinstance(v, dict)]
 
 
 def init_firebase():
@@ -602,7 +633,61 @@ def clean_forwarded_from(value):
     return sender or None
 
 
-def store_message(frm, to, text, voice=None, attachment=None, reply_to=None, forwarded_from=None):
+def clean_poll(value):
+    """Sonda di un messaggio: domanda + 2-10 opzioni. I voti partono vuoti."""
+    if not isinstance(value, dict):
+        return None
+    question = str(value.get("q", "")).strip()[:200]
+    raw = value.get("options")
+    if not question or not isinstance(raw, list):
+        return None
+    options = []
+    for entry in raw[:10]:
+        text = (entry.get("text") if isinstance(entry, dict) else entry)
+        text = str(text or "").strip()[:80]
+        if text:
+            options.append({"text": text, "votes": []})
+    if len(options) < 2:
+        return None
+    return {"q": question, "options": options, "multiple": bool(value.get("multiple"))}
+
+
+def clean_send_at(value):
+    """Timestamp di programmazione (secondi): tra adesso e MAX_SCHEDULE_SECONDS."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        ts = int(value)
+        if now() < ts <= now() + MAX_SCHEDULE_SECONDS:
+            return ts
+    return None
+
+
+def clean_ttl(value):
+    """TTL in secondi per l'auto-eliminazione di un messaggio (60s .. 30 giorni)."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        ttl = int(value)
+        if 60 <= ttl <= MAX_TTL_SECONDS:
+            return ttl
+    return None
+
+
+def expiry_node_id(path, mid):
+    return hashlib.sha256(f"{path}/{mid}".encode("utf-8")).hexdigest()[:32]
+
+
+def register_expiry(kind, path, mid, expires_at, info):
+    """Registra in `expiring/` la scadenza di un messaggio: lo sweeper lo elimina anche dopo un riavvio."""
+    node_id = expiry_node_id(path, mid)
+    fb_set(f"expiring/{node_id}", {
+        "kind": kind, "path": path, "id": mid, "expires_at": expires_at, **info,
+    })
+
+
+def clear_expiry(path, mid):
+    fb_delete(f"expiring/{expiry_node_id(path, mid)}")
+
+
+def store_message(frm, to, text, voice=None, attachment=None, reply_to=None,
+                  forwarded_from=None, poll=None, expires_at=None):
     """Salva un messaggio su Firebase e lo recapita a tutti i dispositivi dei due utenti."""
     msg = {"from": frm, "to": to, "text": text, "ts": now()}
     if voice:
@@ -614,7 +699,14 @@ def store_message(frm, to, text, voice=None, attachment=None, reply_to=None, for
     if forwarded_from:
         msg["forwarded"] = True
         msg["forwarded_from"] = forwarded_from
+    if poll:
+        msg["poll"] = poll
+    if expires_at:
+        msg["expires_at"] = expires_at
     pushed = firebase_ref(f"messages/{pair_key(frm, to)}").push(msg)
+    path = f"messages/{pair_key(frm, to)}"
+    if expires_at:
+        register_expiry("dm", path, pushed.key, expires_at, {"a": frm, "b": to})
     out = dict(msg, t="dm", id=pushed.key)
     send_to(frm, out)
     if to != frm:
@@ -649,8 +741,8 @@ def clean_attachment(value):
         return None
     if len(data) > MAX_PROFILE_MEDIA:
         return None
-    mime = profile_media_mime(data)
-    if mime not in PROFILE_MEDIA_MIMES.values():
+    mime = stored_media_mime(media_hash, data)
+    if mime not in ATTACHMENT_MIMES:
         return None
     name = str(value.get("name", "")).replace("\\", "/").split("/")[-1]
     name = re.sub(r"[\x00-\x1f\x7f]", "", name).strip()[:128]
@@ -659,29 +751,55 @@ def clean_attachment(value):
     return {"hash": media_hash, "name": name, "mime": mime, "size": len(data)}
 
 
+def dm_policy_error(frm, to):
+    """Controlli di invio DM (blocco + policy privacy del destinatario). None se ammesso."""
+    if is_blocked(frm, to):
+        return "Non puoi inviare messaggi a questo utente."
+    target_rec = fb_get(f"users/{to}")
+    if not isinstance(target_rec, dict):
+        return "Utente non trovato."
+    dm_policy = privacy_settings(target_rec)["dm_policy"]
+    is_friend = fb_get(f"contacts/{to}/{frm}") is not None
+    if dm_policy == "friends" and not is_friend:
+        return "Questo utente accetta messaggi solo dai contatti."
+    if dm_policy == "friends_group" and not is_friend and not share_community(frm, to):
+        return "Questo utente accetta messaggi solo da contatti o membri degli stessi gruppi."
+    return None
+
+
 def handle_dm(conn, m):
     to = str(m.get("to", "")).strip().lower()
     text = str(m.get("text", "")).strip()[:MAX_TEXT]
     voice = clean_voice(m.get("voice"))
     attachment = clean_attachment(m.get("attachment"))
+    poll = clean_poll(m.get("poll"))
     if m.get("attachment") is not None and attachment is None:
         return conn.send({"t": "err", "text": "Allegato non valido o non più disponibile."})
-    if voice and not text:
+    if voice and not text and not poll:
         text = "\U0001F3A4 Messaggio vocale"
-    target_rec = fb_get(f"users/{to}")
-    if (not text and not voice and not attachment) or to == conn.user or not isinstance(target_rec, dict):
+    if to == conn.user or not USERNAME_RE.match(to):
         return
-    if is_blocked(conn.user, to):
-        return conn.send({"t": "err", "text": "Non puoi inviare messaggi a questo utente."})
-    dm_policy = privacy_settings(target_rec)["dm_policy"]
-    is_friend = fb_get(f"contacts/{to}/{conn.user}") is not None
-    if dm_policy == "friends" and not is_friend:
-        return conn.send({"t": "err", "text": "Questo utente accetta messaggi solo dai contatti."})
-    if dm_policy == "friends_group" and not is_friend and not share_community(conn.user, to):
-        return conn.send({"t": "err", "text": "Questo utente accetta messaggi solo da contatti o membri degli stessi gruppi."})
+    err = dm_policy_error(conn.user, to)
+    if err:
+        return conn.send({"t": "err", "text": err})
+    if not text and not voice and not attachment and not poll:
+        return
+    reply_to = clean_reply_to(m.get("reply_to"))
+    forwarded_from = clean_forwarded_from(m.get("forwarded_from"))
+    send_at = clean_send_at(m.get("send_at"))
+    ttl = clean_ttl(m.get("ttl"))
+    expires_at = now() + ttl if ttl else None
+    if send_at:
+        fb_set(f"scheduled/{secrets.token_hex(8)}", {
+            "kind": "dm", "from": conn.user, "to": to, "text": text,
+            "voice": voice, "attachment": attachment, "reply_to": reply_to,
+            "forwarded_from": forwarded_from, "poll": poll,
+            "expires_at": expires_at, "send_at": send_at,
+        })
+        return conn.send({"t": "msg_scheduled", "scope": "dm", "with": to, "send_at": send_at})
     store_message(conn.user, to, text, voice, attachment,
-                  reply_to=clean_reply_to(m.get("reply_to")),
-                  forwarded_from=clean_forwarded_from(m.get("forwarded_from")))
+                  reply_to=reply_to, forwarded_from=forwarded_from,
+                  poll=poll, expires_at=expires_at)
 
 
 def handle_history(conn, m):
@@ -690,13 +808,17 @@ def handle_history(conn, m):
         return
     if is_blocked(conn.user, other):
         return conn.send({"t": "err", "text": "Cronologia non disponibile per questa relazione."})
+    before = str(m.get("before", ""))[:80] or None
     msgs = []
-    for k, v in fb_last(f"messages/{pair_key(conn.user, other)}", HISTORY_LIMIT):
+    items, has_more, oldest = fb_page(f"messages/{pair_key(conn.user, other)}", before)
+    for k, v in items:
         if isinstance(v, dict):
             msgs.append(dict(v, id=k))
     read_ts = fb_get(f"read_markers/{conn.user}/dm/{other}")
     conn.send({"t": "history", "with": other, "msgs": msgs,
-               "read_ts": read_ts if isinstance(read_ts, (int, float)) else 0})
+               "has_more": has_more, "oldest": oldest,
+               "read_ts": read_ts if isinstance(read_ts, (int, float)) else 0,
+               **({"before": before} if before else {})})
 
 
 def handle_profile(conn, m):
@@ -2139,7 +2261,9 @@ def handle_community_channel_send(conn, m):
     community_id = valid_community_id(m.get("community"))
     channel_id = valid_community_id(m.get("channel"))
     text = str(m.get("text", "")).strip()[:MAX_TEXT]
+    voice = clean_voice(m.get("voice"))
     attachment = clean_attachment(m.get("attachment"))
+    poll = clean_poll(m.get("poll"))
     if m.get("attachment") is not None and attachment is None:
         return conn.send({"t": "err", "text": "Allegato non valido o non più disponibile."})
     if not community_id or not channel_id:
@@ -2149,11 +2273,29 @@ def handle_community_channel_send(conn, m):
         return
     if not permissions.get("send_messages") and not permissions.get("administrator"):
         return conn.send({"t": "err", "text": "Non puoi inviare messaggi in questo canale."})
-    if not text and not attachment:
+    if not text and not voice and not attachment and not poll:
         return
+    if voice and not text and not poll:
+        text = "\U0001F3A4 Messaggio vocale"
     channel = fb_get(f"communities/{community_id}/channels/{channel_id}")
     if not isinstance(channel, dict):
         return conn.send({"t": "err", "text": "Canale non trovato."})
+    reply_to = clean_reply_to(m.get("reply_to"))
+    forwarded_from = clean_forwarded_from(m.get("forwarded_from"))
+    send_at = clean_send_at(m.get("send_at"))
+    ttl = clean_ttl(m.get("ttl"))
+    expires_at = now() + ttl if ttl else None
+    if send_at:
+        fb_set(f"scheduled/{secrets.token_hex(8)}", {
+            "kind": "community", "from": conn.user, "community": community_id,
+            "channel": channel_id, "text": text, "voice": voice,
+            "attachment": attachment, "reply_to": reply_to,
+            "forwarded_from": forwarded_from, "poll": poll,
+            "expires_at": expires_at, "send_at": send_at,
+        })
+        return conn.send({"t": "msg_scheduled", "scope": "community",
+                          "community": community_id, "channel": channel_id,
+                          "send_at": send_at})
     slowmode = channel.get("slowmode", 0)
     bypass_slowmode = permissions.get("manage_messages") or permissions.get("administrator")
     if slowmode and not bypass_slowmode:
@@ -2179,19 +2321,27 @@ def handle_community_channel_send(conn, m):
                 "text": f"Attendi ancora {remaining} secondi prima di inviare un altro messaggio.",
                 "slowmode_remaining": remaining,
             })
-    message = {
-        "from": conn.user, "text": text, "timestamp": now(),
-    }
-    if attachment:
-        message["attachment"] = attachment
-    reply_to = clean_reply_to(m.get("reply_to"))
-    if reply_to:
-        message["reply_to"] = reply_to
-    forwarded_from = clean_forwarded_from(m.get("forwarded_from"))
-    if forwarded_from:
+    community_deliver(community_id, channel_id, conn.user, {
+        "text": text, "voice": voice, "attachment": attachment, "poll": poll,
+        "reply_to": reply_to, "forwarded_from": forwarded_from,
+        "expires_at": expires_at,
+    })
+
+
+def community_deliver(community_id, channel_id, sender, fields):
+    """Pubblica un messaggio in un canale community e lo recapita ai membri."""
+    message = {"from": sender, "text": fields.get("text", ""), "timestamp": now()}
+    for key in ("voice", "attachment", "poll", "reply_to", "expires_at"):
+        if fields.get(key):
+            message[key] = fields[key]
+    if fields.get("forwarded_from"):
         message["forwarded"] = True
-        message["forwarded_from"] = forwarded_from
-    message_id = firebase_ref(f"communities/{community_id}/messages/{channel_id}").push(message).key
+        message["forwarded_from"] = fields["forwarded_from"]
+    path = f"communities/{community_id}/messages/{channel_id}"
+    message_id = firebase_ref(path).push(message).key
+    if message.get("expires_at"):
+        register_expiry("community", path, message_id, message["expires_at"],
+                        {"community": community_id, "channel": channel_id})
     payload = {"t": "community_message", "community": community_id, "channel": channel_id,
                "message": dict(message, id=message_id)}
     members = fb_get(f"communities/{community_id}/members") or {}
@@ -2208,17 +2358,19 @@ def handle_community_channel_history(conn, m):
     permissions = require_community_permission(conn, community_id, "view_channels", channel_id)
     if not permissions:
         return
+    before = str(m.get("before", ""))[:80] or None
+    items, has_more, oldest = fb_page(
+        f"communities/{community_id}/messages/{channel_id}", before)
     messages = [
         dict(message, id=message_id)
-        for message_id, message in fb_last(
-            f"communities/{community_id}/messages/{channel_id}", HISTORY_LIMIT
-        )
+        for message_id, message in items
         if isinstance(message, dict)
     ]
     read_ts = fb_get(f"read_markers/{conn.user}/c/{community_id}/{channel_id}")
     conn.send({"t": "community_history", "community": community_id, "channel": channel_id,
-               "messages": messages,
-               "read_ts": read_ts if isinstance(read_ts, (int, float)) else 0})
+               "messages": messages, "has_more": has_more, "oldest": oldest,
+               "read_ts": read_ts if isinstance(read_ts, (int, float)) else 0,
+               **({"before": before} if before else {})})
 
 
 # ============================================================== messaggi: reazioni, modifica, eliminazione, pin, stato di lettura, ricerca
@@ -2256,6 +2408,17 @@ def scope_notify(kind, info, payload):
     return base
 
 
+def message_update_notify(conn, kind, info, payload):
+    """Notifica un aggiornamento messaggio. Nei DM ogni destinatario deve ricevere
+    `with` = l'altro partecipante della conversazione (non sempre `info["with"]`)."""
+    if kind == "community":
+        community_broadcast(info["community"], scope_notify(kind, info, dict(payload)))
+        return
+    peer = info["with"]
+    for recipient, other in ((conn.user, peer), (peer, conn.user)):
+        send_to(recipient, scope_notify(kind, {"with": other}, dict(payload)))
+
+
 def handle_msg_edit(conn, m):
     target = message_scope(conn, m)
     if not target:
@@ -2269,12 +2432,8 @@ def handle_msg_edit(conn, m):
     if not isinstance(msg, dict) or msg.get("from") != conn.user or msg.get("deleted"):
         return conn.send({"t": "err", "text": "Puoi modificare solo i tuoi messaggi."})
     fb_update(f"{path}/{mid}", {"text": text, "edited": True})
-    patch = scope_notify(kind, info, {"t": "msg_updated", "id": mid, "text": text, "edited": True})
-    if kind == "community":
-        community_broadcast(info["community"], patch)
-    else:
-        send_to(conn.user, patch)
-        send_to(info["with"], patch)
+    message_update_notify(conn, kind, info,
+                          {"t": "msg_updated", "id": mid, "text": text, "edited": True})
 
 
 def handle_msg_delete(conn, m):
@@ -2293,13 +2452,10 @@ def handle_msg_delete(conn, m):
         allowed = bool(permissions.get("manage_messages") or permissions.get("administrator"))
     if not allowed:
         return conn.send({"t": "err", "text": "Non puoi eliminare questo messaggio."})
-    fb_update(f"{path}/{mid}", {"deleted": True, "text": "", "voice": None, "attachment": None})
-    patch = scope_notify(kind, info, {"t": "msg_deleted", "id": mid})
-    if kind == "community":
-        community_broadcast(info["community"], patch)
-    else:
-        send_to(conn.user, patch)
-        send_to(info["with"], patch)
+    fb_update(f"{path}/{mid}", {"deleted": True, "text": "", "voice": None,
+                                "attachment": None, "poll": None})
+    clear_expiry(path, mid)
+    message_update_notify(conn, kind, info, {"t": "msg_deleted", "id": mid})
 
 
 def handle_msg_react(conn, m):
@@ -2327,12 +2483,8 @@ def handle_msg_react(conn, m):
     else:
         reactions.pop(emoji, None)
     fb_update(f"{path}/{mid}", {"reactions": reactions})
-    patch = scope_notify(kind, info, {"t": "msg_reactions", "id": mid, "reactions": reactions})
-    if kind == "community":
-        community_broadcast(info["community"], patch)
-    else:
-        send_to(conn.user, patch)
-        send_to(info["with"], patch)
+    message_update_notify(conn, kind, info,
+                          {"t": "msg_reactions", "id": mid, "reactions": reactions})
 
 
 def handle_msg_pin(conn, m):
@@ -2350,12 +2502,87 @@ def handle_msg_pin(conn, m):
     if kind == "community" and not (permissions.get("manage_messages") or permissions.get("administrator")):
         return conn.send({"t": "err", "text": "Non puoi fissare messaggi in questo canale."})
     fb_update(f"{path}/{mid}", {"pinned": True} if pinned else {"pinned": None})
-    patch = scope_notify(kind, info, {"t": "msg_pinned", "id": mid, "pinned": pinned})
-    if kind == "community":
-        community_broadcast(info["community"], patch)
+    message_update_notify(conn, kind, info, {"t": "msg_pinned", "id": mid, "pinned": pinned})
+
+
+def handle_msg_vote(conn, m):
+    """Voto su una sonda: `option` = indice. Scelta singola sposta il voto,
+    scelta multipla aggiunge/toglie."""
+    target = message_scope(conn, m)
+    if not target:
+        return
+    kind, path, info, _ = target
+    mid = str(m.get("id", ""))[:80]
+    try:
+        index = int(m.get("option"))
+    except (TypeError, ValueError):
+        return
+    if not mid:
+        return
+    msg = fb_get(f"{path}/{mid}")
+    poll = msg.get("poll") if isinstance(msg, dict) else None
+    if not isinstance(poll, dict) or not isinstance(poll.get("options"), list):
+        return conn.send({"t": "err", "text": "Messaggio non trovato."})
+    options = []
+    for entry in poll["options"][:10]:
+        if not isinstance(entry, dict):
+            continue
+        votes = [u for u in (entry.get("votes") or []) if isinstance(u, str)]
+        options.append({"text": str(entry.get("text", ""))[:80], "votes": votes})
+    if not (0 <= index < len(options)):
+        return
+    multiple = bool(poll.get("multiple"))
+    mine = [i for i, o in enumerate(options) if conn.user in o["votes"]]
+    if conn.user in options[index]["votes"]:
+        options[index]["votes"] = [u for u in options[index]["votes"] if u != conn.user]
     else:
-        send_to(conn.user, patch)
-        send_to(info["with"], patch)
+        if not multiple:
+            for i in mine:
+                options[i]["votes"] = [u for u in options[i]["votes"] if u != conn.user]
+        options[index]["votes"].append(conn.user)
+    clean_poll_data = {"q": str(poll.get("q", ""))[:200], "options": options,
+                       "multiple": multiple}
+    fb_update(f"{path}/{mid}", {"poll": clean_poll_data})
+    message_update_notify(conn, kind, info, {"t": "msg_poll", "id": mid, "poll": clean_poll_data})
+
+
+def handle_msg_expire(conn, m):
+    """Auto-eliminazione: `ttl` in secondi (0 = disattiva). Solo l'autore o un
+    moderatore community puo' impostarla."""
+    target = message_scope(conn, m)
+    if not target:
+        return
+    kind, path, info, permissions = target
+    mid = str(m.get("id", ""))[:80]
+    ttl = m.get("ttl")
+    ttl = int(ttl) if isinstance(ttl, (int, float)) and not isinstance(ttl, bool) else 0
+    if not mid:
+        return
+    msg = fb_get(f"{path}/{mid}")
+    if not isinstance(msg, dict) or msg.get("deleted"):
+        return conn.send({"t": "err", "text": "Messaggio non trovato."})
+    allowed = msg.get("from") == conn.user
+    if kind == "community" and not allowed:
+        allowed = bool(permissions.get("manage_messages") or permissions.get("administrator"))
+    if not allowed:
+        return conn.send({"t": "err", "text": "Non puoi modificare questo messaggio."})
+    if ttl:
+        if not (60 <= ttl <= MAX_TTL_SECONDS):
+            return conn.send({"t": "err", "text": "Scadenza non valida."})
+        expires_at = now() + ttl
+        fb_update(f"{path}/{mid}", {"expires_at": expires_at})
+        if kind == "community":
+            register_expiry("community", path, mid, expires_at,
+                            {"community": info["community"], "channel": info["channel"]})
+        else:
+            register_expiry("dm", path, mid, expires_at,
+                            {"a": msg.get("from"), "b": msg.get("to") or info["with"]})
+    else:
+        expires_at = None
+        fb_update(f"{path}/{mid}", {"expires_at": None})
+        clear_expiry(path, mid)
+    message_update_notify(conn, kind, info,
+                          {"t": "msg_expire", "id": mid, "expires_at": expires_at})
 
 
 def handle_typing(conn, m):
@@ -2434,6 +2661,133 @@ def handle_msg_get(conn, m):
         return conn.send({"t": "err", "text": "Messaggio non trovato."})
     conn.send({"t": "msg_result", "scope": kind, **info,
                "message": dict(msg, id=mid)})
+
+
+# ============================================================== preferiti (bookmark)
+
+def bookmark_base(kind, info):
+    return f"dm/{info['with']}" if kind == "dm" else f"c/{info['community']}/{info['channel']}"
+
+
+def handle_bookmark(conn, m, action):
+    target = message_scope(conn, m)
+    if not target:
+        return conn.send({"t": "err", "text": "Conversazione non trovata."})
+    kind, path, info, _ = target
+    base = f"bookmarks/{conn.user}/{bookmark_base(kind, info)}"
+    if action == "list":
+        raw = fb_get(base) or {}
+        items = [dict(v, id=k) for k, v in raw.items() if isinstance(v, dict)] \
+            if isinstance(raw, dict) else []
+        items.sort(key=lambda item: item.get("ts", 0), reverse=True)
+        conn.send({"t": "bookmark_list", "scope": kind, **info,
+                   "items": items[:100]})
+        return
+    mid = str(m.get("id", ""))[:80]
+    if not mid:
+        return
+    if action == "add":
+        msg = fb_get(f"{path}/{mid}")
+        if not isinstance(msg, dict) or msg.get("deleted"):
+            return conn.send({"t": "err", "text": "Messaggio non trovato."})
+        snap = {
+            "from": msg.get("from"), "text": str(msg.get("text", ""))[:200],
+            "ts": msg.get("ts") or msg.get("timestamp") or now(),
+            "has_attachment": bool(msg.get("attachment")),
+            "has_voice": bool(msg.get("voice")),
+            "has_poll": bool(msg.get("poll")),
+        }
+        fb_set(f"{base}/{mid}", snap)
+        conn.send({"t": "bookmark_saved", "scope": kind, **info, "id": mid})
+    else:
+        fb_delete(f"{base}/{mid}")
+        conn.send({"t": "bookmark_removed", "scope": kind, **info, "id": mid})
+
+
+# ============================================================== scheduled messages & scadenze
+
+def deliver_scheduled(item):
+    """Recapita un messaggio programmato, riverificando i permessi all'invio."""
+    kind = item.get("kind")
+    sender = item.get("from")
+    if not sender:
+        return
+    if kind == "dm":
+        to = str(item.get("to", "")).strip().lower()
+        err = dm_policy_error(sender, to) if USERNAME_RE.match(to or "") else "Utente non trovato."
+        if err:
+            send_to(sender, {"t": "err", "text": f"Messaggio programmato non inviato: {err}"})
+            return
+        store_message(sender, to, str(item.get("text", ""))[:MAX_TEXT],
+                      voice=item.get("voice"), attachment=item.get("attachment"),
+                      reply_to=item.get("reply_to"),
+                      forwarded_from=item.get("forwarded_from"),
+                      poll=item.get("poll"), expires_at=item.get("expires_at"))
+        send_to(sender, {"t": "msg_scheduled_sent", "scope": "dm", "with": to})
+    elif kind == "community":
+        community_id = valid_community_id(item.get("community"))
+        channel_id = valid_community_id(item.get("channel"))
+        if not community_id or not channel_id:
+            return
+        permissions = community_permissions(community_id, sender, channel_id)
+        if not (permissions.get("view_channels") or permissions.get("administrator")) \
+                or not (permissions.get("send_messages") or permissions.get("administrator")):
+            send_to(sender, {"t": "err", "text": "Messaggio programmato non inviato: permessi revocati."})
+            return
+        community_deliver(community_id, channel_id, sender, {
+            "text": str(item.get("text", ""))[:MAX_TEXT],
+            "voice": item.get("voice"), "attachment": item.get("attachment"),
+            "poll": item.get("poll"), "reply_to": item.get("reply_to"),
+            "forwarded_from": item.get("forwarded_from"),
+            "expires_at": item.get("expires_at"),
+        })
+        send_to(sender, {"t": "msg_scheduled_sent", "scope": "community",
+                         "community": community_id, "channel": channel_id})
+
+
+def expire_message(item):
+    """Elimina un messaggio scaduto e notifica i partecipanti."""
+    path, mid = item.get("path"), str(item.get("id", ""))[:80]
+    if not path or not mid or "/" in mid or mid.startswith("."):
+        return
+    if not (path.startswith("messages/") or path.startswith("communities/")):
+        return
+    msg = fb_get(f"{path}/{mid}")
+    if not isinstance(msg, dict) or msg.get("deleted"):
+        return
+    fb_update(f"{path}/{mid}", {"deleted": True, "text": "", "voice": None,
+                                "attachment": None, "poll": None})
+    if item.get("kind") == "community":
+        community_broadcast(item.get("community"), {
+            "t": "msg_deleted", "scope": "community",
+            "community": item.get("community"), "channel": item.get("channel"),
+            "id": mid})
+    else:
+        a, b = item.get("a"), item.get("b")
+        if a and b:
+            for recipient, other in ((a, b), (b, a)):
+                send_to(recipient, {"t": "msg_deleted", "scope": "dm", "with": other, "id": mid})
+
+
+def maintenance_loop():
+    """Sweeper: consegna i messaggi programmati e applica le scadenze. Gira ogni 10s."""
+    while True:
+        try:
+            for key, item in fb_due("scheduled", "send_at"):
+                fb_delete(f"scheduled/{key}")
+                try:
+                    deliver_scheduled(item)
+                except Exception as e:
+                    log(f"Consegna programmata fallita: {e!r}")
+            for key, item in fb_due("expiring", "expires_at"):
+                fb_delete(f"expiring/{key}")
+                try:
+                    expire_message(item)
+                except Exception as e:
+                    log(f"Scadenza messaggio fallita: {e!r}")
+        except Exception as e:
+            log(f"Manutenzione fallita: {e!r}")
+        time.sleep(10)
 
 
 # ============================================================== anteprime link
@@ -2522,6 +2876,24 @@ PROFILE_MEDIA_MIMES = {
     "gif": "image/gif",
 }
 
+# Documenti e audio scaricabili: l'estensione dichiara il tipo, i magic byte lo verificano.
+FILE_ATTACHMENT_MIMES = {
+    "pdf": "application/pdf",
+    "txt": "text/plain",
+    "md": "text/markdown",
+    "csv": "text/csv",
+    "json": "application/json",
+    "zip": "application/zip",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "mp3": "audio/mpeg",
+    "ogg": "audio/ogg",
+    "wav": "audio/wav",
+}
+ZIP_FAMILY = {"zip", "docx", "xlsx", "pptx"}
+ATTACHMENT_MIMES = frozenset(PROFILE_MEDIA_MIMES.values()) | frozenset(FILE_ATTACHMENT_MIMES.values())
+
 
 def profile_media_mime(data):
     if data.startswith(b"\xff\xd8\xff"):
@@ -2539,6 +2911,58 @@ def profile_media_mime(data):
 
 def looks_like_wav(data):
     return data[:4] == b"RIFF" and data[8:12] == b"WAVE"
+
+
+def file_attachment_mime(data, extension):
+    """Mime di un allegato generico, verificato sui magic byte (None se non corrisponde)."""
+    mime = FILE_ATTACHMENT_MIMES.get(extension)
+    if mime is None or not data:
+        return None
+    if extension == "pdf":
+        return mime if data.startswith(b"%PDF") else None
+    if extension in ZIP_FAMILY:
+        return mime if data.startswith(b"PK\x03\x04") else None
+    if extension == "mp3":
+        return mime if data.startswith(b"ID3") or data[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2") else None
+    if extension == "ogg":
+        return mime if data.startswith(b"OggS") else None
+    if extension == "wav":
+        return mime if looks_like_wav(data) else None
+    if extension in ("txt", "md", "csv", "json"):
+        if b"\x00" in data[:4096]:
+            return None
+        try:
+            data.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+        return mime
+    return None
+
+
+def sniff_media_mime(data):
+    """Mime di un file memorizzato senza estensione: media noti, poi WAV."""
+    mime = profile_media_mime(data)
+    if mime:
+        return mime
+    if looks_like_wav(data):
+        return "audio/wav"
+    if data.startswith(b"%PDF"):
+        return "application/pdf"
+    if data.startswith(b"PK\x03\x04"):
+        return "application/zip"
+    if data.startswith(b"ID3") or data[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"):
+        return "audio/mpeg"
+    if data.startswith(b"OggS"):
+        return "audio/ogg"
+    return None
+
+
+def stored_media_mime(media_hash, data):
+    """Mime registrato all'upload in media_meta/, altrimenti ricavato dal contenuto."""
+    meta = fb_get(f"media_meta/{media_hash}")
+    if isinstance(meta, dict) and isinstance(meta.get("mime"), str):
+        return meta["mime"]
+    return sniff_media_mime(data)
 
 
 def store_media(data):
@@ -2589,7 +3013,7 @@ def handle_media(conn, m):
                 data = f.read()
         except OSError:
             return
-        return conn.send({"t": "media", "hash": h, "mime": profile_media_mime(data),
+        return conn.send({"t": "media", "hash": h, "mime": stored_media_mime(h, data),
                           "data": base64.b64encode(data).decode("ascii")})
 
     kind = m.get("kind")
@@ -2607,18 +3031,28 @@ def handle_media(conn, m):
         data = base64.b64decode(str(m.get("data", "")), validate=True)
     except (binascii.Error, ValueError):
         return conn.send({"t": "err", "text": "File non leggibile."})
+    extension = str(m.get("extension", "")).lower().removeprefix(".")
+    mime = None
     if kind == "voice":
         valid = bool(data) and len(data) <= MAX_VOICE and looks_like_wav(data)
-    else:
-        extension = str(m.get("extension", "")).lower().removeprefix(".")
-        expected_mime = PROFILE_MEDIA_MIMES.get(extension)
+        mime = "audio/wav" if valid else None
+    elif extension in PROFILE_MEDIA_MIMES:
+        expected_mime = PROFILE_MEDIA_MIMES[extension]
         valid = (
-            bool(data) and len(data) <= MAX_PROFILE_MEDIA and expected_mime is not None
+            bool(data) and len(data) <= MAX_PROFILE_MEDIA
             and profile_media_mime(data) == expected_mime
         )
+        mime = expected_mime if valid else None
+    elif kind == "attachment" and extension in FILE_ATTACHMENT_MIMES:
+        mime = file_attachment_mime(data, extension)
+        valid = bool(mime) and len(data) <= MAX_PROFILE_MEDIA
+    else:
+        valid = False
     if not valid:
-        return conn.send({"t": "err", "text": "File rifiutato: usa JPG, PNG, WEBP, MP4 o GIF (max 1,7 MB)."})
+        return conn.send({"t": "err", "text": "File rifiutato: immagini, video, documenti o audio (max 1,7 MB)."})
     h = store_media(data)
+    if kind in ("avatar", "banner", "voice", "attachment"):
+        fb_set(f"media_meta/{h}", {"mime": mime})
     if kind in ("avatar", "banner"):
         fb_update(f"users/{conn.user}", {kind: h, kind + "_type": extension})
         conn.send({"t": "media_ok", "kind": kind, "hash": h, "extension": extension})
@@ -2631,8 +3065,7 @@ def handle_media(conn, m):
         conn.send({"t": "media_ok", "kind": kind, "hash": h, "extension": extension})
         send_community_snapshot(conn, community_id)
     else:
-        conn.send({"t": "media_ok", "kind": kind, "hash": h,
-                   "mime": profile_media_mime(data) if kind == "attachment" else None})
+        conn.send({"t": "media_ok", "kind": kind, "hash": h, "mime": mime})
 
 
 def handle_clear_media(conn, m):
@@ -2891,6 +3324,16 @@ def dispatch(conn, m, t):
         handle_msg_react(conn, m)
     elif t == "msg_pin":
         handle_msg_pin(conn, m)
+    elif t == "msg_vote":
+        handle_msg_vote(conn, m)
+    elif t == "msg_expire":
+        handle_msg_expire(conn, m)
+    elif t == "bookmark_add":
+        handle_bookmark(conn, m, "add")
+    elif t == "bookmark_remove":
+        handle_bookmark(conn, m, "remove")
+    elif t == "bookmark_list":
+        handle_bookmark(conn, m, "list")
     elif t == "typing":
         handle_typing(conn, m)
     elif t == "msg_read":
@@ -2932,6 +3375,7 @@ def main():
     gateway = build_gateway()
     init_firebase()
     cleanup_media()
+    threading.Thread(target=maintenance_loop, daemon=True).start()
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind((SERVER_HOST, SERVER_PORT))
