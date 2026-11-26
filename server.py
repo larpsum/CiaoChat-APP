@@ -257,15 +257,21 @@ def fb_due(node, field, limit=50):
 
 
 def init_firebase():
-    if SERVICE_ACCOUNT_JSON:
-        cred = credentials.Certificate(json.loads(SERVICE_ACCOUNT_JSON))
-    elif os.path.exists(SERVICE_ACCOUNT_FILE):
-        cred = credentials.Certificate(SERVICE_ACCOUNT_FILE)
-    else:
+    cred_source = SERVICE_ACCOUNT_JSON or (
+        SERVICE_ACCOUNT_FILE if os.path.exists(SERVICE_ACCOUNT_FILE) else None)
+    if not cred_source:
         sys.exit(f"File credenziali non trovato: {SERVICE_ACCOUNT_FILE}\n"
                  "Scaricalo da Console Firebase > Impostazioni progetto > Account di servizio > "
                  "Genera nuova chiave privata, poi salvalo come serviceAccountKey.json accanto a server.py, "
                  "oppure imposta la variabile d'ambiente PYCHAT_SERVICE_ACCOUNT_JSON col contenuto del file.")
+    try:
+        cred = credentials.Certificate(
+            json.loads(cred_source) if isinstance(cred_source, str) and cred_source.startswith("{")
+            else cred_source)
+    except Exception as exc:
+        sys.exit(f"File credenziali non valido: {exc}\n"
+                 "Rigenera serviceAccountKey.json da Console Firebase > Impostazioni progetto > "
+                 "Account di servizio > Genera nuova chiave privata.")
     firebase_admin.initialize_app(cred, {"databaseURL": FIREBASE_DB_URL})
     fb_get("users")  # prova di connessione: fallisce subito se URL o permessi sono sbagliati
     log(f"Firebase connesso: {FIREBASE_DB_URL}{DB_ROOT}")

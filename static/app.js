@@ -4556,8 +4556,10 @@ function finishVoiceRecording() {
       setComposerFeedback("Upload del vocale scaduto. Riprova.", "error");
     }, 20000);
     const scope = activeScope();
+    const scheduled = pendingScheduleAt > Math.floor(Date.now() / 1000) ? pendingScheduleAt : 0;
     pendingVoiceSend = {
       duration,
+      scheduled,
       target: scope?.kind === "community"
         ? { t: "community_channel_send", community: scope.community, channel: scope.channel }
         : { t: "dm", to: scope?.with || selectedContact },
@@ -5416,9 +5418,19 @@ function onMessage(event) {
         messageInput.disabled = false;
         const pending = pendingVoiceSend;
         pendingVoiceSend = null;
-        const voicePayload = { ...pending.target, voice: { hash: m.hash, dur: pending.duration } };
+        const voicePayload = {
+          ...pending.target,
+          voice: { hash: m.hash, dur: pending.duration },
+          ...(pending.scheduled ? { send_at: pending.scheduled } : {}),
+        };
+        if (pending.scheduled) {
+          pendingScheduleAt = 0;
+          clearScheduleChip();
+        }
         if (!send(voicePayload)) {
           setComposerFeedback("Messaggio vocale non inviato: connessione non disponibile.", "error");
+        } else if (pending.scheduled) {
+          setComposerFeedback("Messaggio vocale programmato.", "success");
         }
         updateSendButton();
       } else if (me && (m.kind === "avatar" || m.kind === "banner")) {
