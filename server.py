@@ -698,11 +698,12 @@ def clean_ttl(value):
 
 
 def clean_enc(value):
-    """Payload cifrato E2EE: 'e1.<iv>.<ct>' in base64url. Opaco per il server."""
+    """Payload cifrato E2EE: 'e1.<iv>.<ct>' o 'e4.<eph>.<iv>.<ct>.<iv2>.<ct2>'
+    in base64url. Opaco per il server."""
     if not isinstance(value, str):
         return None
     value = value.strip()
-    if len(value) > MAX_ENC or not re.fullmatch(r"e1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", value):
+    if len(value) > MAX_ENC or not re.fullmatch(r"e[14](?:\.[A-Za-z0-9_-]+){2,5}", value):
         return None
     return value
 
@@ -3441,7 +3442,7 @@ def handle_media(conn, m):
             return
         if not community_record(community_id):
             return conn.send({"t": "err", "text": "Gruppo non trovato."})
-    elif kind not in ("avatar", "banner", "voice", "attachment"):
+    elif kind not in ("avatar", "banner", "voice", "attachment", "enc"):
         return conn.send({"t": "err", "text": "Tipo di file non supportato."})
     try:
         data = base64.b64decode(str(m.get("data", "")), validate=True)
@@ -3462,12 +3463,16 @@ def handle_media(conn, m):
     elif kind == "attachment" and extension in FILE_ATTACHMENT_MIMES:
         mime = file_attachment_mime(data, extension)
         valid = bool(mime) and len(data) <= MAX_PROFILE_MEDIA
+    elif kind == "enc":
+        # Blob cifrato end-to-end: nessun magic byte, nessuna estensione.
+        valid = bool(data) and len(data) <= MAX_PROFILE_MEDIA
+        mime = "application/octet-stream" if valid else None
     else:
         valid = False
     if not valid:
         return conn.send({"t": "err", "text": "File rifiutato: immagini, video, documenti o audio (max 1,7 MB)."})
     h = store_media(data)
-    if kind in ("avatar", "banner", "voice", "attachment"):
+    if kind in ("avatar", "banner", "voice", "attachment", "enc"):
         fb_set(f"media_meta/{h}", {"mime": mime})
     if kind in ("avatar", "banner"):
         fb_update(f"users/{conn.user}", {kind: h, kind + "_type": extension})

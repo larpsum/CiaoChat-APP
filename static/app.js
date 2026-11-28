@@ -1428,16 +1428,37 @@ async function forwardMessageTo(target) {
     closeForwardPicker();
     return;
   }
+  const forwardPeer = target.t === "dm" ? String(target.to).toLowerCase() : null;
+  const forwardEnc = forwardPeer && await e2eeActiveFor(forwardPeer);
   const payload = { ...target, text, forwarded_from: me?.username || me?.id };
-  if (src.attachment && typeof src.attachment === "object") {
-    payload.attachment = { hash: src.attachment.hash, name: src.attachment.name };
+  const inner = { text };
+  if (src.attachment && typeof src.attachment === "object" && src.attachment.hash) {
+    const sec = e2eeMedia.get(src.attachment.hash);
+    if (forwardEnc && sec) {
+      inner.attachment = {
+        hash: src.attachment.hash, name: src.attachment.name,
+        mime: sec.mime, key: sec.key, iv: sec.iv,
+      };
+    } else {
+      payload.attachment = { hash: src.attachment.hash, name: src.attachment.name };
+    }
   }
-  if (src.voice && typeof src.voice === "object") {
-    payload.voice = src.voice;
+  if (src.voice && typeof src.voice === "object" && src.voice.hash) {
+    const sec = e2eeMedia.get(src.voice.hash);
+    if (forwardEnc && sec) {
+      inner.voice = { hash: src.voice.hash, dur: src.voice.dur, key: sec.key, iv: sec.iv };
+    } else {
+      payload.voice = src.voice;
+    }
   }
-  if (target.t === "dm" && await e2eeActiveFor(String(target.to).toLowerCase())) {
-    const enc = await encryptForPeer(String(target.to).toLowerCase(), { text });
-    if (enc) { payload.enc = enc; payload.text = ""; }
+  if (forwardEnc) {
+    const enc = await encryptForPeer(forwardPeer, inner);
+    if (enc) {
+      payload.enc = enc;
+      payload.text = "";
+      if (inner.attachment) registerE2eeMedia(inner.attachment);
+      if (inner.voice) registerE2eeMedia(inner.voice);
+    }
   }
   if (src.poll && typeof src.poll === "object") {
     payload.poll = {
@@ -4442,8 +4463,19 @@ function uploadChatAttachment(file) {
   };
   reader.onload = () => {
     if (pendingChatAttachment !== upload) return;
+    (async () => {
     const data = String(reader.result).split(",", 2)[1];
-    if (!data || !send({ t: "media_put", kind: "attachment", extension, data })) {
+    const peer = upload.target?.to ? String(upload.target.to).toLowerCase() : null;
+    let uploadOk;
+    if (data && peer && await e2eeActiveFor(peer)) {
+      const bytes = Uint8Array.from(atob(data), c => c.charCodeAt(0));
+      const enc = await encryptMediaBytes(bytes);
+      upload.sec = { key: enc.key, iv: enc.iv, mime: upload.mime, size: file.size };
+      uploadOk = send({ t: "media_put", kind: "enc", extension: "bin", data: b64urlToStdBase64(enc.data) });
+    } else {
+      uploadOk = !!data && send({ t: "media_put", kind: "attachment", extension, data });
+    }
+    if (!uploadOk) {
       discardPendingAttachment();
       setComposerFeedback("Upload non avviato. Controlla la connessione e riprova.", "error");
       return;
@@ -4453,6 +4485,7 @@ function uploadChatAttachment(file) {
       discardPendingAttachment();
       setComposerFeedback("Upload scaduto. Seleziona di nuovo il file.", "error");
     }, 20000);
+    })();
   };
   reader.readAsDataURL(file);
 }
@@ -4829,7 +4862,7 @@ function wavToBase64(buffer) {
   return btoa(binary);
 }
 
-function finishVoiceRecording() {
+async function finishVoiceRecording() {
   if (!voiceRec) return;
   const rec = voiceRec;
   clearTimeout(rec.timer);
@@ -4867,8 +4900,19 @@ function finishVoiceRecording() {
       target: scope?.kind === "community"
         ? { t: "community_channel_send", community: scope.community, channel: scope.channel }
         : { t: "dm", to: scope?.with || selectedContact },
+      sec: null,
     };
-    if (!send({ t: "media_put", kind: "voice", extension: "wav", data: wavToBase64(wav) })) {
+    const voicePeer = pendingVoiceSend.target.t === "dm"
+      ? String(pendingVoiceSend.target.to || "").toLowerCase() : null;
+    let uploadOk;
+    if (voicePeer && await e2eeActiveFor(voicePeer)) {
+      const enc = await encryptMediaBytes(wav);
+      pendingVoiceSend.sec = { key: enc.key, iv: enc.iv };
+      uploadOk = send({ t: "media_put", kind: "enc", extension: "bin", data: b64urlToStdBase64(enc.data) });
+    } else {
+      uploadOk = send({ t: "media_put", kind: "voice", extension: "wav", data: wavToBase64(wav) });
+    }
+    if (!uploadOk) {
       voiceUploadPending = false;
       pendingVoiceSend = null;
       messageInput.disabled = false;
@@ -4893,14 +4937,55 @@ let pendingVoiceSend = null;
 const E2EE_PRIV_LS = "ciaochat.e2ee.priv";
 const E2EE_PUB_LS = "ciaochat.e2ee.pub";
 let e2eeIdentity = null;                    // {privateKey, publicKey, pubRaw}
-const e2eePeerKeys = new Map();             // peer -> {key: CryptoKey, pubRaw: Uint8Array}
+const e2eePeerKeys = new Map();             // peer -> {key: CryptoKey, pubRaw: Uint8Array} (legacy e1)
 const e2eePending = [];                     // peer le cui chiavi sono in derivazione
+const e2eeMedia = new Map();                // hash -> {key, iv, mime} per media cifrati
+
+// ---------- IndexedDB: chiavi di identita' non estraibili ----------
+
+const E2EE_IDB_NAME = "ciaochat-e2ee";
+const E2EE_IDB_STORE = "kv";
+
+function e2eeIdb() {
+  return new Promise((resolve, reject) => {
+    if (!window.indexedDB) return reject(new Error("no idb"));
+    const req = indexedDB.open(E2EE_IDB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(E2EE_IDB_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function idbGet(key) {
+  const db = await e2eeIdb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(E2EE_IDB_STORE, "readonly");
+    const req = tx.objectStore(E2EE_IDB_STORE).get(key);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function idbSet(key, value) {
+  const db = await e2eeIdb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(E2EE_IDB_STORE, "readwrite");
+    tx.objectStore(E2EE_IDB_STORE).put(value, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
 
 function b64urlEncode(buffer) {
   const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+}
+
+function b64urlToStdBase64(text) {
+  const b64 = String(text).replaceAll("-", "+").replaceAll("_", "/");
+  return b64 + "=".repeat((4 - b64.length % 4) % 4);
 }
 
 function b64urlDecode(text) {
@@ -4914,25 +4999,46 @@ function b64urlDecode(text) {
 async function ensureE2EEIdentity() {
   if (e2eeIdentity) return e2eeIdentity;
   try {
+    // Prefer the non-extractable key pair stored in IndexedDB.
+    const stored = await idbGet("identity").catch(() => null);
+    if (stored?.privateKey && stored?.publicKey && typeof stored.pubRaw === "string") {
+      e2eeIdentity = { privateKey: stored.privateKey, publicKey: stored.publicKey, pubRaw: stored.pubRaw };
+      return e2eeIdentity;
+    }
+    // Migrate a legacy localStorage JWK pair into a non-extractable IDB key.
     const storedPriv = localStorage.getItem(E2EE_PRIV_LS);
     const storedPub = localStorage.getItem(E2EE_PUB_LS);
     if (storedPriv && storedPub) {
+      const jwk = JSON.parse(storedPriv);
       const privateKey = await crypto.subtle.importKey(
-        "jwk", JSON.parse(storedPriv), { name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]);
+        "jwk", jwk, { name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]);
       const publicKey = await crypto.subtle.importKey(
         "jwk", JSON.parse(storedPub.jwk), { name: "ECDH", namedCurve: "P-256" }, false, []);
       e2eeIdentity = { privateKey, publicKey, pubRaw: storedPub.raw };
+      await idbSet("identity", { privateKey, publicKey, pubRaw: storedPub.raw }).catch(() => {});
+      localStorage.removeItem(E2EE_PRIV_LS);
+      localStorage.removeItem(E2EE_PUB_LS);
       return e2eeIdentity;
     }
+    // Fresh pair: generate extractable only long enough to export the public
+    // raw bytes and the private JWK, then re-import the private key as
+    // non-extractable before persisting.
     const pair = await crypto.subtle.generateKey(
       { name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
     const privJwk = await crypto.subtle.exportKey("jwk", pair.privateKey);
-    const pubJwk = await crypto.subtle.exportKey("jwk", pair.publicKey);
     const raw = await crypto.subtle.exportKey("raw", pair.publicKey);
-    const pubRaw = b64urlEncode(raw);
-    localStorage.setItem(E2EE_PRIV_LS, JSON.stringify(privJwk));
-    localStorage.setItem(E2EE_PUB_LS, JSON.stringify({ jwk: pubJwk, raw: pubRaw }));
-    e2eeIdentity = { privateKey: pair.privateKey, publicKey: pair.publicKey, pubRaw: `e2.${pubRaw}` };
+    const pubRaw = `e2.${b64urlEncode(raw)}`;
+    const privateKey = await crypto.subtle.importKey(
+      "jwk", privJwk, { name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]);
+    const publicKey = await crypto.subtle.importKey(
+      "raw", raw, { name: "ECDH", namedCurve: "P-256" }, false, []);
+    e2eeIdentity = { privateKey, publicKey, pubRaw };
+    await idbSet("identity", { privateKey, publicKey, pubRaw }).catch(() => {});
+    // Fallback for browsers without IndexedDB: keep the JWK pair.
+    try { await idbGet("identity"); } catch {
+      localStorage.setItem(E2EE_PRIV_LS, JSON.stringify(privJwk));
+      localStorage.setItem(E2EE_PUB_LS, JSON.stringify({ raw: pubRaw }));
+    }
     return e2eeIdentity;
   } catch {
     e2eeIdentity = null;
@@ -4990,18 +5096,98 @@ async function ensurePeerKey(peer) {
   }
 }
 
+// ---------- Envelope e4: ECDH effimero per messaggio + HKDF ----------
+// A differenza di e1 (Chiave statica -> AES diretta), ogni messaggio usa una
+// coppia effimera P-256: la chiave del payload deriva da
+// ECDH(eph_priv, pub_destinatario) via HKDF-SHA256. La chiave effimera viene
+// buttata via dopo l'invio: ne' il server ne' chi cattura il traffico puo'
+// decifrare i messaggi passati anche impadronendosi delle chiavi statiche.
+// Per consentire al mittente di rileggere i propri messaggi in cronologia, la
+// chiave del payload e' avvolta una seconda volta con
+// ECDH(eph_priv, pub_mittente): solo il mittente puo' sbrogliarla.
+
+async function deriveAesKey(bits, info) {
+  const hkdf = await crypto.subtle.importKey("raw", bits, "HKDF", false, ["deriveBits"]);
+  const out = await crypto.subtle.deriveBits(
+    { name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: new TextEncoder().encode(info) },
+    hkdf, 256);
+  // La chiave e' effimera: lasciamo l'export ammesso per il self-wrap e4.
+  return crypto.subtle.importKey("raw", out, "AES-GCM", true, ["encrypt", "decrypt"]);
+}
+
+async function importEcdhPublic(rawBytes) {
+  return crypto.subtle.importKey(
+    "raw", rawBytes, { name: "ECDH", namedCurve: "P-256" }, false, []);
+}
+
 async function encryptForPeer(peer, payload) {
-  const entry = await ensurePeerKey(peer);
-  if (!entry) return null;
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const data = new TextEncoder().encode(JSON.stringify(payload));
-  const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, entry.key, data);
-  return `e1.${b64urlEncode(iv)}.${b64urlEncode(ct)}`;
+  const identity = await ensureE2EEIdentity();
+  const pub = peerE2EEPub(peer);
+  if (!identity || !pub) return null;
+  try {
+    const peerPub = await importEcdhPublic(b64urlDecode(pub.slice(3)));
+    const ownPub = await importEcdhPublic(b64urlDecode(identity.pubRaw.slice(3)));
+    const eph = await crypto.subtle.generateKey(
+      { name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+    const ephPubRaw = await crypto.subtle.exportKey("raw", eph.publicKey);
+
+    // Avvolgimento per il destinatario.
+    const bitsToPeer = await crypto.subtle.deriveBits(
+      { name: "ECDH", public: peerPub }, eph.privateKey, 256);
+    const msgKey = await deriveAesKey(bitsToPeer, "ciaochat-e4/msg");
+    const ivMsg = crypto.getRandomValues(new Uint8Array(12));
+    const data = new TextEncoder().encode(JSON.stringify(payload));
+    const ctMsg = await crypto.subtle.encrypt({ name: "AES-GCM", iv: ivMsg }, msgKey, data);
+
+    // Avvolgimento per il mittente (rilettura in cronologia).
+    const bitsToSelf = await crypto.subtle.deriveBits(
+      { name: "ECDH", public: ownPub }, eph.privateKey, 256);
+    const selfKey = await deriveAesKey(bitsToSelf, "ciaochat-e4/self");
+    const rawMsgKey = await crypto.subtle.exportKey("raw", msgKey);
+    const ivSelf = crypto.getRandomValues(new Uint8Array(12));
+    const ctSelf = await crypto.subtle.encrypt({ name: "AES-GCM", iv: ivSelf }, selfKey, rawMsgKey);
+
+    return `e4.${b64urlEncode(ephPubRaw)}.${b64urlEncode(ivMsg)}.${b64urlEncode(ctMsg)}.${b64urlEncode(ivSelf)}.${b64urlEncode(ctSelf)}`;
+  } catch {
+    return null;
+  }
+}
+
+async function decryptE4(enc) {
+  const parts = enc.split(".");
+  if (parts.length !== 6 || parts[0] !== "e4") return null;
+  const identity = await ensureE2EEIdentity();
+  if (!identity) return null;
+  try {
+    const ephPub = await importEcdhPublic(b64urlDecode(parts[1]));
+    const bits = await crypto.subtle.deriveBits(
+      { name: "ECDH", public: ephPub }, identity.privateKey, 256);
+    const ivMsg = b64urlDecode(parts[2]);
+    const ctMsg = b64urlDecode(parts[3]);
+    // Percorso destinatario: ECDH(la_mia_priv, eph_pub) == ECDH(eph_priv, la_mia_pub).
+    try {
+      const msgKey = await deriveAesKey(bits, "ciaochat-e4/msg");
+      const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: ivMsg }, msgKey, ctMsg);
+      return JSON.parse(new TextDecoder().decode(plain));
+    } catch {}
+    // Percorso mittente: sbroglia la chiave del payload con il wrap "self".
+    const selfKey = await deriveAesKey(bits, "ciaochat-e4/self");
+    const rawMsgKey = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: b64urlDecode(parts[4]) }, selfKey, b64urlDecode(parts[5]));
+    const msgKey = await crypto.subtle.importKey("raw", rawMsgKey, "AES-GCM", false, ["decrypt"]);
+    const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: ivMsg }, msgKey, ctMsg);
+    return JSON.parse(new TextDecoder().decode(plain));
+  } catch {
+    return null;
+  }
 }
 
 async function decryptFromPeer(peer, enc) {
+  if (typeof enc !== "string") return null;
+  if (enc.startsWith("e4.")) return decryptE4(enc);
+  // Legacy e1: chunk key derivata una tantum dalla ECDH statica.
   const entry = await ensurePeerKey(peer);
-  if (!entry || typeof enc !== "string") return null;
+  if (!entry) return null;
   const parts = enc.split(".");
   if (parts.length !== 3 || parts[0] !== "e1") return null;
   try {
@@ -5010,6 +5196,42 @@ async function decryptFromPeer(peer, enc) {
     return JSON.parse(new TextDecoder().decode(plain));
   } catch {
     return null;
+  }
+}
+
+// ---------- Media cifrati end-to-end ----------
+
+async function encryptMediaBytes(bytes) {
+  const keyBytes = crypto.getRandomValues(new Uint8Array(32));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await crypto.subtle.importKey("raw", keyBytes, "AES-GCM", false, ["encrypt"]);
+  const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, bytes);
+  return { data: b64urlEncode(ct), key: b64urlEncode(keyBytes), iv: b64urlEncode(iv) };
+}
+
+async function decryptMediaBytes(b64data, sec) {
+  try {
+    const binary = atob(String(b64data));
+    const ct = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) ct[i] = binary.charCodeAt(i);
+    const key = await crypto.subtle.importKey(
+      "raw", b64urlDecode(sec.key), "AES-GCM", false, ["decrypt"]);
+    const plain = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: b64urlDecode(sec.iv) }, key, ct);
+    let out = "";
+    const bytes = new Uint8Array(plain);
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      out += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    }
+    return btoa(out);
+  } catch {
+    return null;
+  }
+}
+
+function registerE2eeMedia(desc) {
+  if (desc && typeof desc.hash === "string" && desc.key && desc.iv) {
+    e2eeMedia.set(desc.hash, { key: desc.key, iv: desc.iv, mime: desc.mime || "application/octet-stream" });
   }
 }
 
@@ -5026,6 +5248,16 @@ async function decryptMessage(msg, scope) {
   if (payload && typeof payload === "object") {
     msg.text = String(payload.text || "");
     if (payload.reply && typeof payload.reply === "object") msg.reply_to = payload.reply;
+    if (payload.attachment && typeof payload.attachment === "object" && payload.attachment.hash) {
+      const a = payload.attachment;
+      msg.attachment = { hash: a.hash, name: a.name, mime: a.mime, size: a.size };
+      registerE2eeMedia(a);
+    }
+    if (payload.voice && typeof payload.voice === "object" && payload.voice.hash) {
+      const v = payload.voice;
+      msg.voice = { hash: v.hash, dur: v.dur };
+      registerE2eeMedia(v);
+    }
   } else {
     msg.text = "[Messaggio cifrato non leggibile]";
   }
@@ -5444,15 +5676,30 @@ async function sendChatMessage() {
   const scheduled = pendingScheduleAt > Math.floor(Date.now() / 1000) ? pendingScheduleAt : 0;
   let enc = null;
   let replyField = reply;
-  if (!target?.community && text) {
-    const peer = String(target?.to || selectedContact || "").toLowerCase();
-    if (await e2eeActiveFor(peer)) {
-      enc = await encryptForPeer(peer, { text, reply: reply || null });
-      if (enc) replyField = null;   // la risposta viaggia dentro il payload cifrato
-      else {
-        setComposerFeedback("Crittografia non disponibile per questo contatto.", "error");
-        return;
-      }
+  let attachmentInEnc = false;
+  const dmPeer = !target?.community
+    ? String(target?.to || selectedContact || "").toLowerCase() : null;
+  const wantsEnc = !!dmPeer && (text || !!pendingChatAttachment?.sec);
+  if (wantsEnc && await e2eeActiveFor(dmPeer)) {
+    const inner = { text, reply: reply || null };
+    if (pendingChatAttachment?.sec && pendingChatAttachment.hash) {
+      inner.attachment = {
+        hash: pendingChatAttachment.hash,
+        name: pendingChatAttachment.name,
+        mime: pendingChatAttachment.sec.mime,
+        size: pendingChatAttachment.sec.size,
+        key: pendingChatAttachment.sec.key,
+        iv: pendingChatAttachment.sec.iv,
+      };
+      e2eeMedia.set(inner.attachment.hash,
+        { key: inner.attachment.key, iv: inner.attachment.iv, mime: inner.attachment.mime });
+      attachmentInEnc = true;
+    }
+    enc = await encryptForPeer(dmPeer, inner);
+    if (enc) replyField = null;   // la risposta viaggia dentro il payload cifrato
+    else {
+      setComposerFeedback("Crittografia non disponibile per questo contatto.", "error");
+      return;
     }
   }
   const payload = target?.community
@@ -5461,7 +5708,8 @@ async function sendChatMessage() {
         ...(replyField ? { reply_to: replyField } : {}), ...(scheduled ? { send_at: scheduled } : {}) }
     : { t: "dm", to: target?.to || selectedContact, text: enc ? "" : text,
         ...(enc ? { enc } : {}),
-        ...(attachment ? { attachment } : {}), ...(poll ? { poll } : {}),
+        ...(attachment && !attachmentInEnc ? { attachment } : {}),
+        ...(poll ? { poll } : {}),
         ...(replyField ? { reply_to: replyField } : {}), ...(scheduled ? { send_at: scheduled } : {}) };
   if (!payload.to && !payload.community) {
     setComposerFeedback("Seleziona una conversazione o un canale.", "error");
@@ -6340,27 +6588,42 @@ function onMessage(event) {
     case "media":
       mediaRequests.delete(m.hash);
       if (typeof m.data === "string" && typeof m.mime === "string" && m.mime) {
-        mediaCache.set(m.hash, `data:${m.mime};base64,${m.data}`);
-        messages.querySelectorAll("[data-attachment-hash]").forEach(node => {
-          if (node.dataset.attachmentHash !== m.hash) return;
-          const replacement = renderMessageAttachment({ hash: m.hash, mime: m.mime });
-          if (replacement) node.replaceWith(replacement);
-        });
-        messages.querySelectorAll("[data-voice-hash]").forEach(node => {
-          if (node.dataset.voiceHash !== m.hash) return;
-          const replacement = renderVoiceMessage({ hash: m.hash });
-          if (replacement) node.closest(".msg-voice")?.replaceWith(replacement);
-        });
-        renderContacts();
-        renderSelectedContact();
-        if (!contactProfileModal.classList.contains("hidden")) renderContactProfile();
-        if (currentCommunity) renderParticipants(currentCommunity);
-        if (!profileModal.classList.contains("hidden")) renderProfilePreview();
+        (async () => {
+          let mime = m.mime;
+          let data = m.data;
+          const sec = e2eeMedia.get(m.hash);
+          if (sec) {
+            const plain = await decryptMediaBytes(m.data, sec);
+            if (plain === null) {
+              setComposerFeedback("Impossibile decifrare il media.", "error");
+              return;
+            }
+            data = plain;
+            mime = sec.mime || mime;
+          }
+          mediaCache.set(m.hash, `data:${mime};base64,${data}`);
+          messages.querySelectorAll("[data-attachment-hash]").forEach(node => {
+            if (node.dataset.attachmentHash !== m.hash) return;
+            const replacement = renderMessageAttachment({ hash: m.hash, mime });
+            if (replacement) node.replaceWith(replacement);
+          });
+          messages.querySelectorAll("[data-voice-hash]").forEach(node => {
+            if (node.dataset.voiceHash !== m.hash) return;
+            const replacement = renderVoiceMessage({ hash: m.hash });
+            if (replacement) node.closest(".msg-voice")?.replaceWith(replacement);
+          });
+          renderContacts();
+          renderSelectedContact();
+          if (!contactProfileModal.classList.contains("hidden")) renderContactProfile();
+          if (currentCommunity) renderParticipants(currentCommunity);
+          if (!profileModal.classList.contains("hidden")) renderProfilePreview();
+        })();
       }
       break;
 
     case "media_ok":
-      if (m.kind === "attachment" && pendingChatAttachment && attachmentUploadPending) {
+      if ((m.kind === "attachment" || (m.kind === "enc" && pendingChatAttachment && attachmentUploadPending))
+          && pendingChatAttachment && attachmentUploadPending) {
         clearTimeout(attachmentTimer);
         attachmentTimer = null;
         attachmentUploadPending = false;
@@ -6370,18 +6633,37 @@ function onMessage(event) {
         renderPendingAttachment();
         updateSendButton();
         setComposerFeedback("Allegato pronto. Premi Invia per spedirlo.", "success");
-      } else if (m.kind === "voice" && pendingVoiceSend) {
+      } else if ((m.kind === "voice" || (m.kind === "enc" && pendingVoiceSend && voiceUploadPending)) && pendingVoiceSend) {
         clearTimeout(voiceUploadTimer);
         voiceUploadTimer = null;
         voiceUploadPending = false;
         messageInput.disabled = false;
         const pending = pendingVoiceSend;
         pendingVoiceSend = null;
-        const voicePayload = {
-          ...pending.target,
-          voice: { hash: m.hash, dur: pending.duration },
-          ...(pending.scheduled ? { send_at: pending.scheduled } : {}),
-        };
+        (async () => {
+        const peer = pending.target.t === "dm" ? String(pending.target.to || "").toLowerCase() : null;
+        let voicePayload;
+        if (peer && pending.sec && await e2eeActiveFor(peer)) {
+          const enc = await encryptForPeer(peer, {
+            voice: { hash: m.hash, dur: pending.duration, key: pending.sec.key, iv: pending.sec.iv },
+          });
+          if (!enc) {
+            setComposerFeedback("Crittografia non disponibile per questo contatto.", "error");
+            updateSendButton();
+            return;
+          }
+          e2eeMedia.set(m.hash, { key: pending.sec.key, iv: pending.sec.iv, mime: "audio/wav" });
+          voicePayload = {
+            t: "dm", to: pending.target.to, text: "", enc,
+            ...(pending.scheduled ? { send_at: pending.scheduled } : {}),
+          };
+        } else {
+          voicePayload = {
+            ...pending.target,
+            voice: { hash: m.hash, dur: pending.duration },
+            ...(pending.scheduled ? { send_at: pending.scheduled } : {}),
+          };
+        }
         if (pending.scheduled) {
           pendingScheduleAt = 0;
           clearScheduleChip();
@@ -6392,6 +6674,7 @@ function onMessage(event) {
           setComposerFeedback("Messaggio vocale programmato.", "success");
         }
         updateSendButton();
+        })();
       } else if (me && (m.kind === "avatar" || m.kind === "banner")) {
         const preview = me[`${m.kind}_preview`];
         if (preview) mediaCache.set(m.hash, preview);
