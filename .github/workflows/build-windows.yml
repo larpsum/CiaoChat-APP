@@ -23,25 +23,24 @@ jobs:
       - name: Install build dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
           python -m pip install pyinstaller
 
-      - name: Build CiaoChat executable
-        run: python -m PyInstaller CiaoChat.spec --clean --noconfirm
+      - name: Build CiaoChat client executable
+        run: python -m PyInstaller CiaoChat-Client.spec --clean --noconfirm
 
       - name: Build Windows installer
         shell: pwsh
         run: |
           choco install innosetup --no-progress
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" CiaoChat.iss
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" CiaoChat-Client.iss
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: CiaoChat-Windows
+          name: CiaoChat-Client-Windows
           path: |
             dist/CiaoChat.exe
-            dist/CiaoChat-Setup.exe
+            dist/CiaoChat-Client-Setup.exe
           if-no-files-found: error
 
       - name: Publish tagged release
@@ -50,4 +49,4 @@ jobs:
         with:
           files: |
             dist/CiaoChat.exe
-            dist/CiaoChat-Setup.exe
+            dist/CiaoChat-Client-Setup.exe

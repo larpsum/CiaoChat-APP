@@ -8,7 +8,7 @@ a = Analysis(
     ["client_launcher.py"],
     pathex=[],
     binaries=[],
-    datas=[("static", "static")],
+    datas=[("static", "static"), ("server.txt", ".")],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

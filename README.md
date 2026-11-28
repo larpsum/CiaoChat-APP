@@ -3,17 +3,25 @@ Chatting app italiana con interfaccia basata su Discord e Whatsapp combianandone
 
 ## Windows
 
-Scarica `CiaoChat-Setup.exe` dall'ultima release GitHub, oppure esegui:
+### Client (per gli utenti)
+
+Scarica `CiaoChat-Client-Setup.exe` dall'ultima release GitHub e installalo: crea la voce sul desktop e il menu Start. All'avvio apre CiaoChat nel browser, già collegato al server ospitato (`server.txt` è incluso nel pacchetto). Non servono Python, Firebase o configurazioni.
+
+Per ricostruire il client:
 
 ```powershell
 git clone https://github.com/larpsum/CiaoChat-APP.git
 cd CiaoChat-APP
-py -m pip install -r requirements.txt pyinstaller
-py -m PyInstaller CiaoChat.spec --clean --noconfirm
-.\dist\CiaoChat.exe
+py -m pip install pyinstaller
+py -m PyInstaller CiaoChat-Client.spec --clean --noconfirm
+# opzionale: generare l'installer con Inno Setup su CiaoChat-Client.iss
 ```
 
-L'eseguibile avvia il server chat sulla porta `5555`, la web UI sulla porta `8080` e apre CiaoChat nel browser predefinito.
+Il backend si punta con `server.txt` (URL come `https://chat.example.com`), la variabile `CIAOCHAT_SERVER` oppure `static/config.js`.
+
+### Server (autoservito)
+
+Il pacchetto completo (server + UI) si costruisce con `CiaoChat.spec` e include `server.py`, `ws_bridge.py` e la UI. Avvia il server chat sulla porta `5555`, la web UI sulla porta `8080` e apre CiaoChat nel browser predefinito.
 
 ### Credenziali Firebase
 

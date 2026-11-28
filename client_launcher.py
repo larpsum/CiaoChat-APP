@@ -25,7 +25,7 @@ def remote_ws_url():
     if not server:
         # Fall back to a server.txt / ciaochat-server.txt next to the exe or cwd,
         # so end users can point the app at the backend without rebuilds.
-        candidates = []
+        candidates = [os.path.join(BASE_DIR, "server.txt")]
         if getattr(sys, "frozen", False):
             candidates.append(os.path.join(os.path.dirname(sys.executable), "server.txt"))
         candidates += ["server.txt", "ciaochat-server.txt"]
