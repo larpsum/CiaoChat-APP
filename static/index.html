@@ -441,7 +441,16 @@
 
         <section class="settings-panel" data-settings-panel="appearance">
           <h3>Aspetto &amp; Testo</h3>
-          <div class="setting-row"><div><strong>Tema</strong></div><select id="themeSelect"><option value="dark">Scuro</option><option value="oled">OLED nero</option><option value="light">Chiaro</option><option value="glass">Liquid Glass</option></select></div>
+          <div class="setting-row"><div><strong>Tema</strong></div><select id="themeSelect"><option value="dark">Scuro</option><option value="oled">OLED nero</option><option value="light">Chiaro</option><option value="glass">Liquid Glass</option><option value="custom">Personalizzato</option></select></div>
+          <div class="settings-card">
+            <h4>Tema da immagine o video</h4>
+            <p class="muted">Carica una foto: i colori dominanti diventerano la palette dell'app. I video richiedono un badge verificato a pagamento.</p>
+            <div class="profile-file-row">
+              <input id="customThemeFile" type="file" accept="image/*,video/mp4,video/webm,video/quicktime">
+              <button class="btn btn-outline" id="customThemeRemove" type="button">Rimuovi</button>
+            </div>
+            <div id="customThemePreview" class="custom-theme-preview hidden"></div>
+          </div>
           <div class="setting-row"><div><strong>Densità messaggi</strong></div><div class="segmented"><button type="button" data-density="cozy">Confortevole</button><button type="button" data-density="compact">Compatta</button></div></div>
           <label class="range-row"><span>Dimensione testo <output id="fontSizeOut">100%</output></span><input id="fontSize" type="range" min="85" max="130" value="100"></label>
           <label class="toggle-row"><span><strong>Riduci movimento</strong><small>Ferma animazioni e GIF automatiche</small></span><input id="reducedMotion" type="checkbox"><span class="toggle"></span></label>

@@ -2956,3 +2956,90 @@ body.theme-light .verified-black { color: #111827; text-shadow: none; }
 }
 body.theme-light .spoiler { background: #334155; }
 .spoiler.revealed { background: transparent; color: inherit; }
+
+/* ---------- Tema personalizzato ---------- */
+body.theme-custom {
+  background:
+    radial-gradient(circle at 20% 0%, color-mix(in srgb, var(--accent-2, var(--accent)) 16%, transparent), transparent 34rem),
+    radial-gradient(circle at 85% 100%, color-mix(in srgb, var(--accent) 12%, transparent), transparent 30rem),
+    var(--bg-app);
+}
+body.theme-custom .shell {
+  background:
+    radial-gradient(circle at 50% -10%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 40rem),
+    linear-gradient(180deg, color-mix(in srgb, var(--bg-surface) 55%, transparent), color-mix(in srgb, var(--bg-app) 88%, transparent));
+}
+body.theme-custom .msg.self { background: color-mix(in srgb, var(--accent) 26%, var(--surface)); }
+body.theme-custom .settings-nav.active,
+body.theme-custom .tab.active,
+body.theme-custom .community-item.active,
+body.theme-custom .community-channel-button.active { background: var(--accent); }
+
+.custom-theme-preview {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.custom-theme-swatch {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.15);
+}
+
+/* ---------- Liquid Glass: passata più marcata ---------- */
+body.theme-glass .auth-card,
+body.theme-glass .sidebar,
+body.theme-glass .context-sidebar,
+body.theme-glass .conversation,
+body.theme-glass .settings-dialog,
+body.theme-glass .profile-dialog,
+body.theme-glass .contact-profile-dialog {
+  background: linear-gradient(145deg, rgba(255, 255, 255, 0.11), rgba(255, 255, 255, 0.04));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.05),
+    0 24px 70px rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(30px) saturate(170%);
+  -webkit-backdrop-filter: blur(30px) saturate(170%);
+}
+body.theme-glass .conv-header,
+body.theme-glass .composer,
+body.theme-glass .community-channel-bar,
+body.theme-glass .call-panel,
+body.theme-glass .settings-header,
+body.theme-glass .settings-sidebar,
+body.theme-glass .member-invite-panel,
+body.theme-glass .participant-search-row,
+body.theme-glass .participant-index-toggle,
+body.theme-glass .sidebar-header,
+body.theme-glass .sidebar-footer,
+body.theme-glass .unsaved-bar {
+  background: rgba(10, 15, 27, 0.42);
+  backdrop-filter: blur(26px) saturate(160%);
+  -webkit-backdrop-filter: blur(26px) saturate(160%);
+}
+body.theme-glass .settings-card,
+body.theme-glass .settings-list-item,
+body.theme-glass .role-item {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.13);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+body.theme-glass .msg.other {
+  background: rgba(255, 255, 255, 0.09);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  backdrop-filter: blur(10px);
+}
+body.theme-glass .msg.self {
+  background: linear-gradient(135deg, rgba(139, 156, 255, 0.34), rgba(139, 156, 255, 0.2));
+  border: 1px solid rgba(255, 255, 255, 0.14);
+}
+body.theme-glass ::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+}
+body.theme-glass ::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+}

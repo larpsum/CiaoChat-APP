@@ -2905,6 +2905,7 @@ function switchSettingsSection(section) {
 
 function populateLocalSettings() {
   el("themeSelect").value = localSettings.theme;
+  renderCustomThemePreview();
   el("fontSize").value = localSettings.fontSize;
   el("fontSizeOut").textContent = `${localSettings.fontSize}%`;
   el("reducedMotion").checked = localSettings.reducedMotion;
@@ -2963,16 +2964,23 @@ function collectLocalSettings() {
     voiceSensitivity: Number(el("voiceSensitivity").value),
     echoCancel: el("echoCancel").checked,
     noiseSuppress: el("noiseSuppress").checked,
+    customTheme: localSettings.customTheme || null,
     autoGain: el("autoGain").checked,
     keybinds: { ...localSettings.keybinds },
   };
 }
 
 function applyLiveAppearance() {
-  document.body.classList.remove("theme-oled", "theme-light", "theme-glass", "message-compact", "reduced-motion");
+  document.body.classList.remove("theme-oled", "theme-light", "theme-glass", "theme-custom", "message-compact", "reduced-motion");
   if (localSettings.theme === "oled") document.body.classList.add("theme-oled");
   if (localSettings.theme === "light") document.body.classList.add("theme-light");
   if (localSettings.theme === "glass") document.body.classList.add("theme-glass");
+  if (localSettings.theme === "custom") {
+    document.body.classList.add("theme-custom");
+    applyCustomThemeVars(localSettings.customTheme);
+  } else {
+    applyCustomThemeVars(null);
+  }
   if (localSettings.density === "compact") document.body.classList.add("message-compact");
   if (localSettings.reducedMotion) document.body.classList.add("reduced-motion");
   document.documentElement.style.fontSize = `${localSettings.fontSize}%`;
@@ -2981,6 +2989,195 @@ function applyLiveAppearance() {
   applyCallAudioSettings();
   updateUnreadBadge();
 }
+
+// ---------- Tema personalizzato da immagine/video ----------
+
+const CUSTOM_THEME_VARS = [
+  "--bg-app", "--bg-surface", "--bg-surface-muted", "--border-subtle",
+  "--border-strong", "--surface", "--surface-hover", "--border",
+  "--accent-primary", "--accent-hover", "--accent", "--text-primary",
+  "--text-secondary", "--text-muted", "--accent-2",
+];
+
+function hexToHsl(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  const r = ((n >> 16) & 255) / 255, g = ((n >> 8) & 255) / 255, b = (n & 255) / 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  if (max === min) return { h: 0, s: 0, l };
+  const d = max - min;
+  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+  let h;
+  if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+  else if (max === g) h = ((b - r) / d + 2) / 6;
+  else h = ((r - g) / d + 4) / 6;
+  return { h: h * 360, s, l };
+}
+
+function hslToHex(h, s, l) {
+  s = Math.min(1, Math.max(0, s)); l = Math.min(1, Math.max(0, l));
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = l - c / 2;
+  let r = 0, g = 0, b = 0;
+  if (h < 60) [r, g, b] = [c, x, 0];
+  else if (h < 120) [r, g, b] = [x, c, 0];
+  else if (h < 180) [r, g, b] = [0, c, x];
+  else if (h < 240) [r, g, b] = [0, x, c];
+  else if (h < 300) [r, g, b] = [x, 0, c];
+  else [r, g, b] = [c, 0, x];
+  const to = v => Math.round((v + m) * 255).toString(16).padStart(2, "0");
+  return `#${to(r)}${to(g)}${to(b)}`;
+}
+
+function extractThemePalette(canvas) {
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  const { width: w, height: ch } = canvas;
+  const data = ctx.getImageData(0, 0, w, ch).data;
+  const buckets = new Map();   // hue -> {weight, r, g, b, n}
+  for (let i = 0; i < data.length; i += 16) {
+    const a = data[i + 3];
+    if (a < 128) continue;
+    const r = data[i] / 255, g = data[i + 1] / 255, b = data[i + 2] / 255;
+    const { h: hue, s, l } = hexToHsl(`#${[r, g, b].map(v =>
+      Math.round(v * 255).toString(16).padStart(2, "0")).join("")}`);
+    if (s < 0.18 || l < 0.06 || l > 0.94) continue;
+    const key = Math.round(hue / 30) * 30 % 360;
+    const bucket = buckets.get(key) || { weight: 0, r: 0, g: 0, b: 0, n: 0 };
+    bucket.weight += s * (1 - Math.abs(l - 0.5) * 1.4);
+    bucket.r += data[i]; bucket.g += data[i + 1]; bucket.b += data[i + 2];
+    bucket.n++;
+    buckets.set(key, bucket);
+  }
+  const ranked = [...buckets.values()]
+    .filter(b => b.n > 8)
+    .sort((a, b) => b.weight - a.weight)
+    .slice(0, 3);
+  if (!ranked.length) return null;
+  const toHex = b => `#${[b.r / b.n, b.g / b.n, b.b / b.n]
+    .map(v => Math.round(v).toString(16).padStart(2, "0")).join("")}`;
+  const primary = ranked[0];
+  const { h } = hexToHsl(toHex(primary));
+  const secondary = ranked[1] || primary;
+  const { h: h2 } = hexToHsl(toHex(secondary));
+  return {
+    primary: hslToHex(h, 0.72, 0.62),
+    secondary: hslToHex(h2, 0.6, 0.55),
+    bg: hslToHex(h, 0.32, 0.05),
+    surface: hslToHex(h, 0.26, 0.11),
+    surfaceHover: hslToHex(h, 0.24, 0.16),
+    border: hslToHex(h, 0.18, 0.24),
+    borderStrong: hslToHex(h, 0.2, 0.38),
+  };
+}
+
+function canvasFromVideoFrame(video) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 96; canvas.height = 96;
+  const ctx = canvas.getContext("2d");
+  const vw = video.videoWidth || 320, vh = video.videoHeight || 240;
+  const scale = Math.min(canvas.width / vw, canvas.height / vh);
+  const dw = vw * scale, dh = vh * scale;
+  ctx.drawImage(video, (canvas.width - dw) / 2, (canvas.height - dh) / 2, dw, dh);
+  return canvas;
+}
+
+async function themeFromFile(file) {
+  if (file.type.startsWith("video/")) {
+    const paid = !!(me?.verification || settingsSnapshot?.account?.verification);
+    if (!paid) throw new Error("I video richiedono un badge verificato a pagamento.");
+    const url = URL.createObjectURL(file);
+    try {
+      const video = document.createElement("video");
+      video.muted = true; video.playsInline = true; video.preload = "auto";
+      video.src = url;
+      await new Promise((resolve, reject) => {
+        video.onloadeddata = resolve;
+        video.onerror = () => reject(new Error("Video non leggibile."));
+        setTimeout(() => reject(new Error("Video non leggibile.")), 8000);
+      });
+      video.currentTime = Math.min(1, (video.duration || 2) / 3);
+      await new Promise(resolve => { video.onseeked = resolve; setTimeout(resolve, 3000); });
+      return extractThemePalette(canvasFromVideoFrame(video));
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+  const bitmap = await createImageBitmap(file);
+  try {
+    const canvas = document.createElement("canvas");
+    canvas.width = 96; canvas.height = 96;
+    const ctx = canvas.getContext("2d");
+    const scale = Math.min(canvas.width / bitmap.width, canvas.height / bitmap.height);
+    const dw = bitmap.width * scale, dh = bitmap.height * scale;
+    ctx.drawImage(bitmap, (canvas.width - dw) / 2, (canvas.height - dh) / 2, dw, dh);
+    return extractThemePalette(canvas);
+  } finally {
+    bitmap.close();
+  }
+}
+
+function applyCustomThemeVars(theme) {
+  const style = document.body.style;
+  CUSTOM_THEME_VARS.forEach(name => style.removeProperty(name));
+  if (!theme) return;
+  const map = {
+    "--bg-app": theme.bg, "--bg-surface": theme.surface,
+    "--bg-surface-muted": theme.bg, "--surface": theme.surface,
+    "--surface-hover": theme.surfaceHover, "--border": theme.border,
+    "--border-subtle": theme.border, "--border-strong": theme.borderStrong,
+    "--accent-primary": theme.primary, "--accent": theme.primary,
+    "--accent-hover": theme.secondary, "--accent-2": theme.secondary,
+    "--text-primary": "#f2f4fb", "--text-secondary": "#d5dbea",
+    "--text-muted": "#9aa5bd", "--text": "#f2f4fb",
+  };
+  Object.entries(map).forEach(([name, value]) => style.setProperty(name, value));
+}
+
+function renderCustomThemePreview() {
+  const box = el("customThemePreview");
+  if (!box) return;
+  const theme = localSettings.customTheme;
+  box.classList.toggle("hidden", !theme);
+  if (!theme) { box.replaceChildren(); return; }
+  box.replaceChildren();
+  [theme.primary, theme.secondary, theme.bg, theme.surface].forEach(color => {
+    const chip = document.createElement("span");
+    chip.className = "custom-theme-swatch";
+    chip.style.background = color;
+    chip.title = color;
+    box.appendChild(chip);
+  });
+}
+
+el("customThemeFile")?.addEventListener("change", async event => {
+  const file = event.target.files?.[0];
+  event.target.value = "";
+  if (!file) return;
+  try {
+    const palette = await themeFromFile(file);
+    if (!palette) throw new Error("Nessun colore dominante trovato.");
+    localSettings = { ...localSettings, customTheme: palette };
+    localStorage.setItem("ciaochat.settings", JSON.stringify(localSettings));
+    renderCustomThemePreview();
+    if (localSettings.theme !== "custom") {
+      el("themeSelect").value = "custom";
+      localSettings.theme = "custom";
+      localStorage.setItem("ciaochat.settings", JSON.stringify(localSettings));
+    }
+    applyLiveAppearance();
+    el("profileStatus").textContent = "Tema personalizzato applicato.";
+  } catch (error) {
+    el("profileStatus").textContent = error.message || "Impossibile generare il tema.";
+    el("profileStatus").className = "settings-status error";
+  }
+});
+el("customThemeRemove")?.addEventListener("click", () => {
+  localSettings = { ...localSettings, customTheme: null };
+  localStorage.setItem("ciaochat.settings", JSON.stringify(localSettings));
+  renderCustomThemePreview();
+  applyLiveAppearance();
+});
 
 if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
   let glassPointerFrame = null;
