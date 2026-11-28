@@ -1052,258 +1052,14 @@ import { RenderPass } from "./vendor/postprocessing/RenderPass.js";
   let banknotes = [];
   let noteTextures = null;
 
+  // Official BEP scans of the Series 2009 $100 note (public domain).
+  const NOTE_IMAGES = [
+    "static/assets/us-100-front.png",
+    "static/assets/us-100-back.png",
+  ];
+
   function makeNoteTextures() {
-    const W = 440;
-    const H = 190;
-    const INK = "#1c6b3d";
-    const INK_DARK = "#0d4a29";
-    const INK_LIGHT = "#2f8f57";
-    const variants = [];
-
-    for (let v = 0; v < 3; v++) {
-      const canvas = document.createElement("canvas");
-      canvas.width = W;
-      canvas.height = H;
-      const ctx = canvas.getContext("2d");
-
-      const paper = ctx.createLinearGradient(0, 0, W, H);
-      paper.addColorStop(0, "#f2f7e8");
-      paper.addColorStop(0.4, "#e2eed4");
-      paper.addColorStop(0.75, "#d2dfc0");
-      paper.addColorStop(1, "#c2d2ae");
-      ctx.fillStyle = paper;
-      ctx.fillRect(0, 0, W, H);
-
-      // laid paper: faint horizontal chain lines + fibre speckle
-      ctx.strokeStyle = "rgba(110,135,95,0.08)";
-      ctx.lineWidth = 0.6;
-      for (let y = 4; y < H; y += 4) {
-        ctx.beginPath();
-        ctx.moveTo(0, y + Math.sin(y * 0.7) * 0.4);
-        ctx.lineTo(W, y);
-        ctx.stroke();
-      }
-      ctx.fillStyle = "rgba(120,140,100,0.10)";
-      for (let i = 0; i < 700; i++) {
-        ctx.fillRect(Math.random() * W, Math.random() * H, 1.3, 0.7);
-      }
-      // aged edge darkening
-      const vign = ctx.createRadialGradient(W / 2, H / 2, H * 0.35, W / 2, H / 2, W * 0.62);
-      vign.addColorStop(0, "rgba(0,0,0,0)");
-      vign.addColorStop(1, "rgba(60,80,45,0.16)");
-      ctx.fillStyle = vign;
-      ctx.fillRect(0, 0, W, H);
-
-      const serialA = `L${(10000000 + v * 7919 + Math.floor(Math.random() * 89999999))}`;
-      const serialB = `${String.fromCharCode(65 + v)}${Math.floor(10000000 + Math.random() * 89999999)}`;
-
-      // watermark: oversized faint denomination
-      ctx.save();
-      ctx.globalAlpha = 0.07;
-      ctx.fillStyle = INK_DARK;
-      ctx.font = "700 120px Georgia, serif";
-      ctx.textAlign = "center";
-      ctx.fillText("100", W * 0.68, H * 0.78);
-      ctx.restore();
-
-      // frame: outer + inner hairlines with corner rosettes
-      ctx.strokeStyle = INK;
-      ctx.lineWidth = 3;
-      ctx.strokeRect(4, 4, W - 8, H - 8);
-      ctx.lineWidth = 1;
-      ctx.strokeRect(11, 11, W - 22, H - 22);
-      ctx.strokeStyle = INK_LIGHT;
-      ctx.lineWidth = 0.8;
-      ctx.strokeRect(15, 15, W - 30, H - 30);
-      // corner flourishes
-      ctx.strokeStyle = INK;
-      for (const [cx, cy, sx, sy] of [[18, 18, 1, 1], [W - 18, 18, -1, 1], [18, H - 18, 1, -1], [W - 18, H - 18, -1, -1]]) {
-        ctx.beginPath();
-        ctx.arc(cx + 14 * sx, cy + 10 * sy, 9, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.arc(cx + 22 * sx, cy + 18 * sy, 5, 0, Math.PI * 2);
-        ctx.stroke();
-      }
-
-      // guilloche rosette behind portrait
-      const gx = W * 0.30;
-      const gy = H * 0.5;
-      ctx.save();
-      ctx.strokeStyle = "rgba(31,143,87,0.30)";
-      ctx.lineWidth = 0.7;
-      for (let ring = 0; ring < 14; ring++) {
-        ctx.beginPath();
-        const baseR = 16 + ring * 4.4;
-        for (let a = 0; a <= Math.PI * 2 + 0.05; a += 0.08) {
-          const r = baseR + Math.sin(a * 9 + ring * 1.3) * 2.6;
-          const px = gx + Math.cos(a) * r;
-          const py = gy + Math.sin(a) * r * 0.82;
-          if (a === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
-        }
-        ctx.stroke();
-      }
-      ctx.restore();
-
-      // portrait oval: engraved bust of Franklin
-      const px = gx, py = gy;
-      ctx.save();
-      ctx.beginPath();
-      ctx.ellipse(px, py, 30, 42, 0, 0, Math.PI * 2);
-      ctx.clip();
-      const bust = ctx.createLinearGradient(px - 30, py, px + 30, py);
-      bust.addColorStop(0, "#0d4a29");
-      bust.addColorStop(1, "#1c6b3d");
-      ctx.fillStyle = bust;
-      ctx.fillRect(px - 32, py - 44, 64, 88);
-      // head
-      ctx.fillStyle = "#0d4a29";
-      ctx.beginPath();
-      ctx.ellipse(px, py - 14, 12.5, 15.5, 0, 0, Math.PI * 2);
-      ctx.fill();
-      // shoulders / coat
-      ctx.beginPath();
-      ctx.moveTo(px - 24, py + 44);
-      ctx.quadraticCurveTo(px - 22, py + 6, px - 9, py + 1);
-      ctx.lineTo(px + 9, py + 1);
-      ctx.quadraticCurveTo(px + 22, py + 6, px + 24, py + 44);
-      ctx.closePath();
-      ctx.fill();
-      // engraving hatch lines
-      ctx.strokeStyle = "rgba(200,230,205,0.5)";
-      ctx.lineWidth = 0.6;
-      for (let i = -28; i <= 28; i += 3.5) {
-        ctx.beginPath();
-        ctx.moveTo(px + i, py - 38);
-        ctx.lineTo(px + i + 10, py + 42);
-        ctx.stroke();
-      }
-      ctx.restore();
-      // oval frame
-      ctx.strokeStyle = INK_DARK;
-      ctx.lineWidth = 2.4;
-      ctx.beginPath();
-      ctx.ellipse(px, py, 30, 42, 0, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.lineWidth = 0.8;
-      ctx.beginPath();
-      ctx.ellipse(px, py, 34, 46, 0, 0, Math.PI * 2);
-      ctx.stroke();
-
-      // name under portrait
-      ctx.textAlign = "center";
-      ctx.fillStyle = INK_DARK;
-      ctx.font = "700 11px Georgia, 'Times New Roman', serif";
-      ctx.fillText("BENJAMIN FRANKLIN", px, py + 56);
-
-      // left seal: Treasury-style star seal
-      const sx = W * 0.115;
-      const sy = H * 0.42;
-      ctx.strokeStyle = INK_DARK;
-      ctx.fillStyle = "rgba(28,107,61,0.12)";
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(sx, sy, 17, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(sx, sy, 13.5, 0, Math.PI * 2);
-      ctx.lineWidth = 0.8;
-      ctx.stroke();
-      // radial spokes + star
-      ctx.lineWidth = 0.7;
-      for (let i = 0; i < 12; i++) {
-        const a = (i / 12) * Math.PI * 2;
-        ctx.beginPath();
-        ctx.moveTo(sx + Math.cos(a) * 4, sy + Math.sin(a) * 4);
-        ctx.lineTo(sx + Math.cos(a) * 12.5, sy + Math.sin(a) * 12.5);
-        ctx.stroke();
-      }
-      ctx.fillStyle = INK_DARK;
-      ctx.beginPath();
-      for (let i = 0; i < 5; i++) {
-        const a = -Math.PI / 2 + (i * 4 * Math.PI) / 5;
-        const x = sx + Math.cos(a) * 6.5;
-        const y = sy + Math.sin(a) * 6.5;
-        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-      }
-      ctx.closePath();
-      ctx.fill();
-      ctx.font = "8px ui-monospace, monospace";
-      ctx.fillText("TREASURY", sx, sy + 24);
-
-      // right seal: Federal Reserve letter
-      const rx = W * 0.885;
-      const ry = H * 0.42;
-      ctx.strokeStyle = INK_DARK;
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(rx, ry, 17, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(rx, ry, 13.5, 0, Math.PI * 2);
-      ctx.lineWidth = 0.8;
-      ctx.stroke();
-      ctx.font = "700 19px Georgia, serif";
-      ctx.fillStyle = INK_DARK;
-      ctx.fillText("B", rx, ry + 7);
-      ctx.font = "8px ui-monospace, monospace";
-      ctx.fillText("FEDERAL RESERVE", rx, ry + 24);
-
-      // security thread: translucent strip with microtext
-      const threadX = W * 0.80;
-      ctx.save();
-      ctx.globalAlpha = 0.55;
-      ctx.fillStyle = "#bcd8c4";
-      ctx.fillRect(threadX - 7, 20, 14, H - 40);
-      ctx.strokeStyle = INK_LIGHT;
-      ctx.lineWidth = 0.8;
-      ctx.strokeRect(threadX - 7, 20, 14, H - 40);
-      ctx.translate(threadX, H / 2);
-      ctx.rotate(-Math.PI / 2);
-      ctx.fillStyle = INK_DARK;
-      ctx.font = "7px ui-monospace, monospace";
-      ctx.textAlign = "center";
-      for (let i = -3; i <= 3; i++) ctx.fillText("USA 100 ", i * 46, 0);
-      ctx.restore();
-
-      // microprint along the inner border
-      ctx.fillStyle = "rgba(13,74,41,0.5)";
-      ctx.font = "4.5px ui-monospace, monospace";
-      ctx.textAlign = "left";
-      for (let x = 24; x < W - 30; x += 78) ctx.fillText("THE UNITED STATES OF AMERICA ", x, 23.5);
-      for (let x = 24; x < W - 30; x += 78) ctx.fillText("ONE HUNDRED DOLLARS ", x, H - 18.5);
-
-      // top inscription
-      ctx.font = "700 12.5px Georgia, 'Times New Roman', serif";
-      ctx.fillStyle = INK_DARK;
-      ctx.fillText("THE UNITED STATES OF AMERICA", W / 2, 36);
-      ctx.font = "9.5px Georgia, serif";
-      ctx.fillStyle = INK;
-      ctx.fillText("ONE HUNDRED DOLLARS", W / 2, H - 42);
-
-      // serial numbers
-      ctx.font = "700 11px ui-monospace, monospace";
-      ctx.fillStyle = INK_DARK;
-      ctx.fillText(serialA, 32, 26);
-      ctx.fillText(serialB, W - 32, 26);
-      ctx.fillText(serialB, 32, H - 16);
-      ctx.fillText(serialA, W - 32, H - 16);
-
-      // denomination numerals in corners
-      ctx.font = "700 16px Georgia, serif";
-      ctx.fillText("100", 24, 48);
-      ctx.fillText("100", W - 24, 48);
-      ctx.fillText("100", 24, H - 26);
-      ctx.fillText("100", W - 24, H - 26);
-      // small stars flanking header
-      ctx.font = "11px Georgia, serif";
-      ctx.fillText("✦", W / 2 - 168, 36);
-      ctx.fillText("✦", W / 2 + 168, 36);
-
-      variants.push(canvas.toDataURL("image/png"));
-    }
-    return variants;
+    return NOTE_IMAGES.slice();
   }
 
   function createBanknotes() {
@@ -1438,6 +1194,9 @@ import { RenderPass } from "./vendor/postprocessing/RenderPass.js";
         const relN = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
         if (relN < 0) {
           const impulse = (-(1 + 0.42) * relN) / totalInv;
+          const kick = Math.min(1.6, Math.abs(relN) * 0.006 + 0.15);
+          a.kick = Math.min(2, (a.kick || 0) + kick * invA);
+          b.kick = Math.min(2, (b.kick || 0) + kick * invB);
           a.vx -= impulse * invA * nx;
           a.vy -= impulse * invA * ny;
           b.vx += impulse * invB * nx;
@@ -1473,6 +1232,7 @@ import { RenderPass } from "./vendor/postprocessing/RenderPass.js";
       note.y += note.vy * delta * (0.7 + note.depth * 0.6);
       note.x += (note.vx + Math.sin(seconds * 1.2 + note.phase) * 26) * delta * (0.7 + note.depth * 0.6);
       note.rotBase += note.spin * delta;
+      note.kick = Math.max(0, (note.kick || 0) - delta * 1.6);
       if (note.y > fieldHeight + 90) {
         note.y = random(-140, -30);
         note.x = random(-80, fieldWidth + 80);
@@ -1485,24 +1245,48 @@ import { RenderPass } from "./vendor/postprocessing/RenderPass.js";
     resolveBanknoteCollisions();
     for (const note of banknotes) {
       const flutter = Math.sin(seconds * (1.9 + note.depth) + note.phase);
+      const speed = Math.hypot(note.vx, note.vy);
+      const air = Math.min(1, speed / 360) + (note.kick || 0) * 0.6;
+      const curl = Math.min(2.6, air);
+      // paper flex: the sheet twists along its long axis and pitches toward/away
+      // from the viewer, with a leading-edge lag driven by horizontal speed.
+      // Two detuned sines per axis give it an irregular, cloth-like wobble.
+      const twist = Math.sin(seconds * (2.1 + note.depth * 0.9) + note.phase * 2.3)
+        + 0.55 * Math.sin(seconds * (3.9 + note.depth * 0.5) + note.phase * 4.1);
+      const roll = Math.sin(seconds * (1.35 + note.depth * 0.5) + note.phase * 1.4)
+        + 0.5 * Math.sin(seconds * (2.9 + note.depth * 0.8) + note.phase * 3.3);
+      const pitch = Math.cos(seconds * (1.8 + note.depth * 0.6) + note.phase)
+        + 0.45 * Math.sin(seconds * (3.3 + note.depth * 0.4) + note.phase * 2.7);
+      const bendX = twist * 0.22 * curl;
+      const bendY = clamp(roll * 0.34 * curl + note.vx * 0.00055, -1.25, 1.25);
+      const bendZ = pitch * 0.20 * curl;
+      const wiggle = Math.sin(seconds * (3.4 + note.depth * 0.7) + note.phase * 5.1) * 0.20 * Math.min(1.4, curl);
+      const curlDeg = (bendX * 57.3 + bendY * 57.3).toFixed(1);
+      const shade = Math.min(0.3, 0.1 + curl * 0.09);
+      note.el.style.setProperty("--curl", `${curlDeg}deg`);
+      note.el.style.setProperty("--hi", (shade * 0.8).toFixed(3));
+      note.el.style.setProperty("--lo", (shade * 0.9).toFixed(3));
       if (note.grabbed) {
         const heldFlutter = flutter * 0.1;
         const tilt = clamp(note.flingX * 0.0014, -0.55, 0.55);
         const lean = clamp(note.flingY * 0.0009, -0.12, 0.12);
         note.el.style.transform =
-          `translate3d(${note.x.toFixed(1)}px, ${note.y.toFixed(1)}px, 0) ` +
-          `rotate(${(note.rotBase + tilt + heldFlutter).toFixed(3)}rad) skewY(${lean.toFixed(3)}rad) ` +
+          `perspective(760px) translate3d(${note.x.toFixed(1)}px, ${note.y.toFixed(1)}px, 0) ` +
+          `rotate(${(note.rotBase + tilt + heldFlutter + wiggle * 0.4).toFixed(3)}rad) ` +
+          `rotateX(${(-lean + bendZ * 0.5).toFixed(3)}rad) rotateY(${(tilt * 0.6 + bendY * 0.3 + wiggle * 0.25).toFixed(3)}rad) ` +
+          `skewX(${(bendX * 0.5 + wiggle * 0.3).toFixed(3)}rad) ` +
           `scale(${note.scale.toFixed(3)}, ${note.scale.toFixed(3)})`;
         continue;
       }
       const flex = Math.sin(seconds * 2.7 + note.phase * 2.1);
-      const rot = note.rotBase + flutter * 0.38;
-      const skew = flex * 0.14;
-      const squash = 1 + flex * 0.05;
+      const rot = note.rotBase + flutter * 0.38 + wiggle;
+      const skew = flex * 0.14 + bendX * 0.55 + wiggle * 0.35;
+      const squash = 1 + flex * 0.05 + wiggle * 0.04;
       note.el.style.transform =
-        `translate3d(${note.x.toFixed(1)}px, ${note.y.toFixed(1)}px, 0) ` +
-        `rotate(${rot.toFixed(3)}rad) skewY(${skew.toFixed(3)}rad) ` +
-        `scale(${note.scale.toFixed(3)}, ${(note.scale * squash).toFixed(3)})`;
+        `perspective(760px) translate3d(${note.x.toFixed(1)}px, ${note.y.toFixed(1)}px, 0) ` +
+        `rotate(${rot.toFixed(3)}rad) rotateX(${bendZ.toFixed(3)}rad) rotateY(${bendY.toFixed(3)}rad) ` +
+        `skewY(${skew.toFixed(3)}rad) ` +
+        `scale(${note.scale.toFixed(3)}, ${(note.scale * squash * (1 - Math.abs(bendZ) * 0.12)).toFixed(3)})`;
     }
   }
 

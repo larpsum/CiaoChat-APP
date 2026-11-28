@@ -1707,6 +1707,30 @@ body.theme-glass .unsaved-bar {
   user-select: none;
   will-change: transform;
 }
+#authShell .fly-note::before,
+#authShell .fly-note::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+}
+/* light catching the curled face of the paper */
+#authShell .fly-note::before {
+  background: linear-gradient(
+    calc(115deg + var(--curl, 0deg)),
+    rgba(255, 255, 255, var(--hi, 0.10)) 0%,
+    rgba(255, 255, 255, 0) 46%
+  );
+}
+/* soft shadow where the paper bends away */
+#authShell .fly-note::after {
+  background: linear-gradient(
+    calc(295deg + var(--curl, 0deg)),
+    rgba(18, 34, 20, var(--lo, 0.16)) 0%,
+    rgba(18, 34, 20, 0) 52%
+  );
+}
 #authShell .fly-note.is-grabbed {
   z-index: 6;
   cursor: grabbing;
