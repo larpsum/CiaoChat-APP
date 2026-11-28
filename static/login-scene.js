@@ -1046,29 +1046,154 @@ import { RenderPass } from "./vendor/postprocessing/RenderPass.js";
   }
 
   /* ------------------------------------------------------------------ */
-  /*  Flying banknotes (DOM layer used with the video backdrop)          */
-  /* ------------------------------------------------------------------ */
+  /*  Geo-localized backdrop video + banknote art                        */
+  /*  `notes` entries carry the bill's aspect ratio (w/h) so non-US       */
+  /*  currencies keep their real proportions instead of being stretched.  */
 
-  let banknotes = [];
-  let noteTextures = null;
+  const GEO_REGIONS = {
+    us: {
+      video: "static/assets/login-bg.mp4",
+      notes: [
+        { src: "static/assets/us-100-front.png", ar: 2.37 },
+        { src: "static/assets/us-100-back.png", ar: 2.38 },
+      ],
+    },
+    uk: {
+      video: "static/assets/geo/uk.mp4",
+      notes: [
+        // Commons photo of the polymer £50 (no scan is freely licensed)
+        { src: "static/assets/geo/uk-50-front.jpg", ar: 1.333 },
+      ],
+    },
+    eu: {
+      video: "static/assets/geo/eu.mp4",
+      notes: [
+        { src: "static/assets/geo/eu-100-front.jpg", ar: 1.925 },
+        { src: "static/assets/geo/eu-100-back.jpg", ar: 1.913 },
+      ],
+    },
+    jp: {
+      video: "static/assets/geo/jp.mp4",
+      notes: [
+        { src: "static/assets/geo/jp-10000-front.jpg", ar: 2.087 },
+        { src: "static/assets/geo/jp-10000-back.jpg", ar: 2.085 },
+      ],
+    },
+    in: {
+      video: "static/assets/geo/in.mp4",
+      notes: [
+        { src: "static/assets/geo/in-500-front.jpg", ar: 2.386 },
+        { src: "static/assets/geo/in-500-back.jpg", ar: 2.385 },
+      ],
+    },
+    au: {
+      video: "static/assets/geo/au.mp4",
+      notes: [
+        { src: "static/assets/geo/au-100-front.jpg", ar: 2.432 },
+        { src: "static/assets/geo/au-100-back.jpg", ar: 2.408 },
+      ],
+    },
+    br: {
+      video: "static/assets/geo/br.mp4",
+      notes: [
+        { src: "static/assets/geo/br-200-front.jpg", ar: 2.030 },
+        { src: "static/assets/geo/br-200-back.jpg", ar: 2.038 },
+      ],
+    },
+  };
 
-  // Official BEP scans of the Series 2009 $100 note (public domain).
-  const NOTE_IMAGES = [
-    "static/assets/us-100-front.png",
-    "static/assets/us-100-back.png",
+  const COUNTRY_REGION = {
+    US: "us", CA: "us",
+    GB: "uk", UK: "uk",
+    JP: "jp",
+    IN: "in",
+    AU: "au", NZ: "au",
+    BR: "br",
+    // Eurozone
+    AT: "eu", BE: "eu", CY: "eu", EE: "eu", FI: "eu", FR: "eu", DE: "eu",
+    GR: "eu", IE: "eu", IT: "eu", LV: "eu", LT: "eu", LU: "eu", MT: "eu",
+    NL: "eu", PT: "eu", SK: "eu", SI: "eu", ES: "eu", HR: "eu", MC: "eu",
+    SM: "eu", VA: "eu", AD: "eu", ME: "eu", XK: "eu",
+  };
+
+  const TZ_REGION = [
+    [/^Europe\/(London)/, "uk"],
+    [/^Europe\//, "eu"],
+    [/^Asia\/Tokyo/, "jp"],
+    [/^Asia\/(Kolkata|Calcutta)/, "in"],
+    [/^Australia\//, "au"],
+    [/^Pacific\/(Auckland|Fiji)/, "au"],
+    [/^America\/Sao_Paulo/, "br"],
+    [/^America\//, "us"],
   ];
 
-  function makeNoteTextures() {
-    return NOTE_IMAGES.slice();
+  let banknotes = [];
+  let noteArt = GEO_REGIONS.us.notes;
+  let currentVideo = "static/assets/login-bg.mp4";
+
+  function regionFromTimezone() {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+    for (const [re, region] of TZ_REGION) if (re.test(tz)) return region;
+    return null;
+  }
+
+  async function resolveGeoRegion() {
+    const params = new URLSearchParams(window.location.search);
+    const forced = (params.get("geo") || localStorage.getItem("ciaochat.geo") || "").toLowerCase();
+    if (GEO_REGIONS[forced]) return forced;
+    try {
+      const res = await fetch("https://ipapi.co/json/", { signal: AbortSignal.timeout(3500) });
+      const data = await res.json();
+      const region = COUNTRY_REGION[String(data.country_code || "").toUpperCase()];
+      if (region && (GEO_REGIONS[region].notes.length || GEO_REGIONS[region].video)) return region;
+    } catch {}
+    const tzRegion = regionFromTimezone();
+    if (tzRegion && (GEO_REGIONS[tzRegion].notes.length || GEO_REGIONS[tzRegion].video)) return tzRegion;
+    return "us";
+  }
+
+  function setBackdropVideo(src) {
+    if (!bgVideo || !src || src === currentVideo) return;
+    currentVideo = src;
+    bgVideo.style.transition = "opacity 0.8s ease";
+    bgVideo.style.opacity = "0";
+    const source = bgVideo.querySelector("source") || document.createElement("source");
+    source.src = src;
+    source.type = "video/mp4";
+    if (!source.parentNode) bgVideo.appendChild(source);
+    const reveal = () => {
+      bgVideo.style.opacity = "";
+      bgVideo.play().catch(() => {});
+      bgVideo.removeEventListener("loadeddata", reveal);
+    };
+    bgVideo.addEventListener("loadeddata", reveal);
+    bgVideo.load();
+    setTimeout(reveal, 3000);
+  }
+
+  function applyGeoAssets(region) {
+    const assets = GEO_REGIONS[region];
+    if (!assets) return;
+    if (assets.video) setBackdropVideo(assets.video);
+    if (!assets.notes.length) return;
+    noteArt = assets.notes;
+    for (const note of banknotes) {
+      const art = noteArt[note.side % noteArt.length];
+      note.el.style.backgroundImage = `url(${art.src})`;
+      note.el.style.setProperty("--ar", art.ar.toFixed(3));
+    }
   }
 
   function createBanknotes() {
-    if (!noteTextures) noteTextures = makeNoteTextures();
+    if (!noteArt) noteArt = GEO_REGIONS.us.notes;
     const count = Math.max(10, Math.min(18, Math.round((width || 1280) / 95)));
     for (let i = 0; i < count; i++) {
       const el = document.createElement("div");
       el.className = "fly-note";
-      el.style.backgroundImage = `url(${noteTextures[i % noteTextures.length]})`;
+      const side = i % noteArt.length;
+      const art = noteArt[side];
+      el.style.backgroundImage = `url(${art.src})`;
+      el.style.setProperty("--ar", art.ar.toFixed(3));
       const depth = random(0.25, 1);
       el.style.filter = `hue-rotate(${random(-8, 8)}deg) brightness(${random(0.82, 1.08)}) blur(${((1 - depth) * 1.4).toFixed(2)}px) drop-shadow(0 ${6 + depth * 8}px ${10 + depth * 12}px rgba(0,0,0,${(0.25 + depth * 0.25).toFixed(2)}))`;
       shell.appendChild(el);
@@ -1087,6 +1212,7 @@ import { RenderPass } from "./vendor/postprocessing/RenderPass.js";
         grabbed: false,
         flingX: 0,
         flingY: 0,
+        side,
       };
       banknotes.push(note);
       bindBanknote(note);
@@ -1410,7 +1536,10 @@ import { RenderPass } from "./vendor/postprocessing/RenderPass.js";
   }
   window.addEventListener("resize", resizeField, { passive: true });
   if (!useVideoBg) initializeThreeScene();
-  else createBanknotes();
+  else {
+    createBanknotes();
+    resolveGeoRegion().then(applyGeoAssets).catch(() => {});
+  }
   const visibilityObserver = new MutationObserver(() => {
     if (authShellHidden()) {
       stopAnimation();

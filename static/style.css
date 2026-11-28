@@ -1699,7 +1699,8 @@ body.theme-glass .unsaved-bar {
   left: 0;
   top: 0;
   width: 148px;
-  height: 64px;
+  aspect-ratio: var(--ar, 2.31);
+  height: auto;
   background-size: 100% 100%;
   background-repeat: no-repeat;
   border-radius: 2px;
