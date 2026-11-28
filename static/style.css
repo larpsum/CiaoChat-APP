@@ -140,12 +140,40 @@ input::placeholder { color: var(--text-muted); }
 }
 
 .login-card-official {
+  position: relative;
+  overflow: hidden;
   max-width: 430px;
   padding: 28px 32px 26px;
-  border-color: rgba(190, 202, 255, 0.13);
+  border: 1px solid rgba(255, 255, 255, 0.3);
   border-radius: 24px;
-  background: linear-gradient(145deg, rgba(28, 37, 61, 0.96), rgba(15, 21, 37, 0.98));
-  box-shadow: 0 32px 90px rgba(0, 0, 0, 0.45), inset 0 1px rgba(255, 255, 255, 0.07);
+  background: linear-gradient(145deg, rgba(24, 33, 60, 0.52), rgba(10, 15, 32, 0.62));
+  backdrop-filter: blur(17px) saturate(140%);
+  -webkit-backdrop-filter: blur(17px) saturate(140%);
+  box-shadow:
+    0 8px 32px rgba(0, 0, 0, 0.28),
+    0 32px 90px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.5),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.1);
+}
+.login-card-official::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.8), transparent);
+  pointer-events: none;
+}
+.login-card-official::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 100%;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.8), transparent 40%, rgba(255, 255, 255, 0.3));
+  pointer-events: none;
 }
 .login-card-official .brand {
   color: #aab5ff;
