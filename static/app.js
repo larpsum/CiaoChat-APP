@@ -5271,9 +5271,23 @@ async function decryptMessageList(scope, msgs) {
   return Promise.all((msgs || []).map(msg => decryptMessage(msg, scope)));
 }
 
+const e2eeProfileRequests = new Set();   // peer per cui e' gia' stato chiesto il profilo
+
 async function e2eeActiveFor(peer) {
   if (!peer || peer === String(me?.id || "").toLowerCase()) return false;
   await ensureE2EEIdentity();
+  if (!(e2eeIdentity && peerE2EEPub(peer))) {
+    // Chiave pubblica mancante: chiedi il profilo una volta e attendi che
+    // la chiave arrivi, cosi' la cifratura e' attiva sempre quando possibile.
+    const p = String(peer).toLowerCase();
+    if (!e2eeProfileRequests.has(p)) {
+      e2eeProfileRequests.add(p);
+      send({ t: "profile", user: p });
+    }
+    for (let i = 0; i < 20 && !peerE2EEPub(p); i++) {
+      await new Promise(resolve => setTimeout(resolve, 150));
+    }
+  }
   return !!(e2eeIdentity && peerE2EEPub(peer) && await ensurePeerKey(peer));
 }
 
@@ -5701,6 +5715,8 @@ async function sendChatMessage() {
       setComposerFeedback("Crittografia non disponibile per questo contatto.", "error");
       return;
     }
+  } else if (wantsEnc) {
+    setComposerFeedback("Attenzione: impossibile cifrare — il contatto non ha ancora una chiave. Messaggio in chiaro.", "error");
   }
   const payload = target?.community
     ? { t: "community_channel_send", ...target, text,
@@ -6570,6 +6586,7 @@ function onMessage(event) {
       break;
 
     case "profile":
+      if (m.profile) updateProfile(m.profile);
       if (m.profile?.id === requestedProfileId) {
         profileBeingViewed = m.profile;
         requestedProfileId = null;
